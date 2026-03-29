@@ -1,0 +1,38 @@
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Compiled binaries
+ipv6-proxy
+ipv6-proxy-linux
+ipv6-proxy-linux-*
+*.exe
+
+# Node
+web/node_modules/
+web/dist/
+
+# Docs (local only — contains credentials, server info, task logs)
+docs/
+
+# Deployment scripts (contain real server credentials)
+scripts/deploy-*.sh
+
+# Claude / AI assistant
+CLAUDE.md
+
+# Environment & secrets
+.env
+.env.*
+*.pem
+*.key
+*.crt
+
+# Generated articles
+*.docx
