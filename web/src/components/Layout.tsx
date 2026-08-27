@@ -2,12 +2,12 @@ import { ReactNode } from 'react'
 
 export default function Layout({ title, children, actions }: { title: string; children: ReactNode; actions?: ReactNode }) {
   return (
-    <div className="glass">
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <div className="glass-title">{title}</div>
-        {actions}
+    <section className="panel">
+      <div className="panel-head">
+        <h2 className="panel-title">{title}</h2>
+        {actions && <div className="panel-actions">{actions}</div>}
       </div>
       {children}
-    </div>
+    </section>
   )
 }

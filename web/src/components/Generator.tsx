@@ -1,8 +1,12 @@
 import { useEffect, useState } from 'react'
+import { Copy, KeyRound } from 'lucide-react'
 import { UserInfo, api } from '../api'
+import { useI18n } from '../i18n'
 import Layout from './Layout'
+import { Btn } from './ui'
 
 export default function Generator({ flash }: { flash: (msg: string) => void }) {
+  const { m, t } = useI18n()
   const [accounts, setAccounts] = useState<UserInfo[]>([])
   const [account, setAccount] = useState('')
   const [password, setPassword] = useState('')
@@ -25,7 +29,7 @@ export default function Generator({ flash }: { flash: (msg: string) => void }) {
 
   const generate = async () => {
     if (!account || !password) {
-      flash('Account and password required')
+      flash(m.generator.required)
       return
     }
     const res = await api.generateCredentials({
@@ -39,50 +43,49 @@ export default function Generator({ flash }: { flash: (msg: string) => void }) {
       password,
     })
     if (res.status === 'error') {
-      flash(res.message || 'Generate failed')
+      flash(res.message || m.generator.failed)
       return
     }
     setLines(res.lines || [])
     setCurl(res.curl || '')
-    flash('Generated ' + (res.lines?.length ?? 0) + ' credentials')
+    flash(t('generator.generated', { n: res.lines?.length ?? 0 }))
   }
 
   const copy = async () => {
     await navigator.clipboard.writeText(lines.join('\n'))
-    flash('Copied')
+    flash(m.generator.copied)
   }
 
   return (
-    <Layout title="Credential Generator" actions={<button className="btn btn-primary" onClick={generate}>Generate</button>}>
-      <p style={{ color: '#94a3b8', fontSize: 13, marginBottom: 12 }}>
-        Sticky format: <span className="mono">account_sid_XXXXXXXX_time_N:password@host:port</span>.
-        Rotate uses the bare account name. Credentials are not stored; first use creates the sticky session.
+    <Layout title={m.generator.title} actions={<Btn variant="primary" icon={KeyRound} onClick={generate}>{m.generator.generate}</Btn>}>
+      <p className="lede">
+        {m.generator.helpPrefix} <span className="mono">{m.generator.format}</span>. {m.generator.helpSuffix}
       </p>
-      <div className="input-row" style={{ flexWrap: 'wrap' }}>
+      <div className="input-row">
         <select className="input" value={account} onChange={e => setAccount(e.target.value)}>
           {accounts.map(a => <option key={a.user} value={a.user}>{a.user}</option>)}
         </select>
-        <input className="input" type="password" placeholder="account password" value={password} onChange={e => setPassword(e.target.value)} />
+        <input className="input" type="password" placeholder={m.generator.password} value={password} onChange={e => setPassword(e.target.value)} />
         <select className="input" value={mode} onChange={e => setMode(e.target.value)}>
-          <option value="sticky">sticky</option>
-          <option value="rotate">rotate</option>
+          <option value="sticky">{m.generator.sticky}</option>
+          <option value="rotate">{m.generator.rotate}</option>
         </select>
-        <input className="input" type="number" min={1} max={180} value={ttl} onChange={e => setTtl(e.target.value)} style={{ width: 80 }} title="minutes" disabled={mode !== 'sticky'} />
-        <input className="input" type="number" min={1} max={100} value={count} onChange={e => setCount(e.target.value)} style={{ width: 80 }} title="count" />
+        <input className="input" type="number" min={1} max={180} value={ttl} onChange={e => setTtl(e.target.value)} style={{ width: 80 }} title={m.generator.minutes} disabled={mode !== 'sticky'} />
+        <input className="input" type="number" min={1} max={100} value={count} onChange={e => setCount(e.target.value)} style={{ width: 80 }} title={m.generator.count} />
         <select className="input" value={protocol} onChange={e => setProtocol(e.target.value)}>
           <option value="http">HTTP/HTTPS</option>
           <option value="socks5">SOCKS5</option>
         </select>
-        <input className="input" placeholder="host (optional)" value={host} onChange={e => setHost(e.target.value)} />
-        <input className="input" placeholder="port (optional)" value={port} onChange={e => setPort(e.target.value)} style={{ width: 90 }} />
+        <input className="input" placeholder={m.generator.host} value={host} onChange={e => setHost(e.target.value)} />
+        <input className="input" placeholder={m.generator.port} value={port} onChange={e => setPort(e.target.value)} style={{ width: 90 }} />
       </div>
-      {curl && <p className="mono" style={{ fontSize: 12, color: '#818cf8', margin: '12px 0' }}>{curl}</p>}
+      {curl && <p className="curl-line">{curl}</p>}
       {lines.length > 0 && (
         <>
-          <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 8 }}>
-            <button className="btn btn-ghost" onClick={copy}>Copy all</button>
+          <div style={{ display: 'flex', justifyContent: 'flex-end', margin: '12px 0' }}>
+            <Btn icon={Copy} onClick={copy}>{m.common.copy}</Btn>
           </div>
-          <textarea className="input" readOnly value={lines.join('\n')} style={{ width: '100%', minHeight: 240, fontFamily: 'ui-monospace, monospace', fontSize: 12 }} />
+          <textarea className="cred-sheet" readOnly value={lines.join('\n')} />
         </>
       )}
     </Layout>

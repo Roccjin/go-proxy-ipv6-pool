@@ -1,6 +1,9 @@
 import { useState } from 'react'
+import { FlaskConical, Power, PowerOff, RefreshCw } from 'lucide-react'
 import { Overview, PrefixInfo, api } from '../api'
+import { useI18n } from '../i18n'
 import Layout from './Layout'
+import { Btn } from './ui'
 
 function fmtBytes(b: number): string {
   if (b > 1073741824) return (b / 1073741824).toFixed(2) + ' GB'
@@ -10,7 +13,7 @@ function fmtBytes(b: number): string {
 }
 
 function lat(ms: number): string {
-  return ms < 0 ? '-' : ms + 'ms'
+  return ms < 0 ? '—' : ms + 'ms'
 }
 
 function Stat({ label, value, cls, wide }: { label: string; value: string | number; cls?: string; wide?: boolean }) {
@@ -40,7 +43,8 @@ interface TestResult {
   }
 }
 
-function PrefixCard({ p, onRefresh }: { p: PrefixInfo; onRefresh: () => void }) {
+function PrefixBody({ p, onRefresh, hero }: { p: PrefixInfo; onRefresh: () => void; hero?: boolean }) {
+  const { m, t } = useI18n()
   const [testing, setTesting] = useState(false)
   const [testResult, setTestResult] = useState<TestResult | null>(null)
   const [toggling, setToggling] = useState(false)
@@ -59,86 +63,113 @@ function PrefixCard({ p, onRefresh }: { p: PrefixInfo; onRefresh: () => void }) 
     try {
       const res = await api.testPrefix(p.prefix)
       setTestResult(res)
-    } catch (e: any) {
-      setTestResult({ status: 'error', message: e.message })
+    } catch (e: unknown) {
+      setTestResult({ status: 'error', message: e instanceof Error ? e.message : String(e) })
     } finally { setTesting(false) }
+  }
+
+  const actions = (
+    <div className="prefix-actions">
+      <Btn
+        variant={p.enabled ? 'danger' : 'primary'}
+        icon={p.enabled ? PowerOff : Power}
+        onClick={handleToggle}
+        disabled={toggling}
+      >
+        {toggling ? '...' : p.enabled ? m.common.disable : m.common.enable}
+      </Btn>
+      <Btn icon={FlaskConical} onClick={handleTest} disabled={testing}>
+        {testing ? m.overview.testing : m.overview.test}
+      </Btn>
+    </div>
+  )
+
+  const result = testResult && (
+    <div className={`prefix-test-result ${testResult.status === 'ok' ? 'success' : 'fail'}`}>
+      {testResult.status === 'ok'
+        ? <>
+            <div>{testResult.exit_ip} ({testResult.latency_ms}ms)</div>
+            {testResult.geo && testResult.geo.status === 'success' && (
+              <div style={{ marginTop: 6, color: 'var(--mute)' }}>
+                {[testResult.geo.city, testResult.geo.regionName, testResult.geo.country].filter(Boolean).join(', ')}
+                {testResult.geo.isp && <span> · {testResult.geo.isp}</span>}
+                {testResult.geo.as && <span> · {testResult.geo.as}</span>}
+              </div>
+            )}
+          </>
+        : t('overview.fail', { msg: testResult.message ?? '' })}
+    </div>
+  )
+
+  if (hero) {
+    return (
+      <div className="prefix-hero">
+        <div>
+          <div className="mast-kicker">/{p.bits} · {p.enabled ? m.status.online : m.status.offline}</div>
+          <div className="prefix-addr">
+            {p.prefix}<span>/{p.bits}</span>
+          </div>
+        </div>
+        <div className="prefix-plate">
+          <div className="prefix-meta">
+            <span>{m.overview.onTheFly}</span>
+            <span>{m.overview.max} {p.max_capacity}</span>
+          </div>
+          {actions}
+          {result}
+        </div>
+      </div>
+    )
   }
 
   return (
     <div className={`prefix-card${!p.enabled ? ' disabled' : ''}`}>
       <div className="prefix-header">
-        <span className={`prefix-status ${p.enabled ? 'online' : 'offline'}`} />
-        <span className="mono" style={{ fontSize: 13 }}>/{p.bits}</span>
-        <span className="mono" style={{ color: '#818cf8', fontSize: 12 }}>{p.prefix}</span>
+        <span className={`pulse ${p.enabled ? 'on' : ''}`} />
+        <span className="mono">/{p.bits}</span>
+        <span className="mono" style={{ color: 'var(--ion)' }}>{p.prefix}</span>
       </div>
       <div className="prefix-meta">
-        <span>on-the-fly</span>
-        <span style={{ color: '#475569', fontSize: 11 }}>max: {p.max_capacity}</span>
+        <span>{m.overview.onTheFly}</span>
+        <span>{m.overview.max} {p.max_capacity}</span>
       </div>
-      <div className="prefix-actions">
-        <button
-          className={`btn ${p.enabled ? 'btn-danger' : 'btn-primary'}`}
-          onClick={handleToggle}
-          disabled={toggling}
-          style={{ fontSize: 11, padding: '3px 10px' }}
-        >
-          {toggling ? '...' : p.enabled ? 'Disable' : 'Enable'}
-        </button>
-        <button
-          className="btn btn-ghost"
-          onClick={handleTest}
-          disabled={testing}
-          style={{ fontSize: 11, padding: '3px 10px' }}
-        >
-          {testing ? 'Testing...' : 'Test'}
-        </button>
-      </div>
-      {testResult && (
-        <div className={`prefix-test-result ${testResult.status === 'ok' ? 'success' : 'fail'}`}>
-          {testResult.status === 'ok'
-            ? <>
-                <div>{testResult.exit_ip} ({testResult.latency_ms}ms)</div>
-                {testResult.geo && testResult.geo.status === 'success' && (
-                  <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 3 }}>
-                    {[testResult.geo.city, testResult.geo.regionName, testResult.geo.country].filter(Boolean).join(', ')}
-                    {testResult.geo.isp && <span style={{ color: '#64748b' }}> · {testResult.geo.isp}</span>}
-                    {testResult.geo.as && <span style={{ color: '#64748b' }}> · {testResult.geo.as}</span>}
-                  </div>
-                )}
-              </>
-            : `FAIL — ${testResult.message}`}
-        </div>
-      )}
+      {actions}
+      {result}
     </div>
   )
 }
 
 export default function OverviewPanel({ data, onRefresh }: { data: Overview | null; onRefresh: () => void }) {
+  const { m } = useI18n()
   if (!data) return null
 
   const prefixes = data.prefixes ?? []
+  const [first, ...rest] = prefixes
 
   return (
-    <Layout title="Overview" actions={<><button className="btn btn-ghost" onClick={onRefresh}>Refresh</button></>}>
-      <div className="prefix-grid">
-        {prefixes.map((p, i) => (
-          <PrefixCard key={i} p={p} onRefresh={onRefresh} />
-        ))}
-      </div>
-      <div className="stat-grid">
-        <Stat label="Max IPv6" value={data.max_ipv6} cls="accent" wide />
-        <Stat label="Sticky Sessions" value={data.active_sessions} />
-        <Stat label="Total Requests" value={data.total_requests} />
-        <Stat label="IPv6 Direct" value={data.ipv6_direct} cls="success" />
-        <Stat label="IPv4 Fallback" value={data.ipv4_fallback} cls={data.ipv4_fallback > 0 ? 'warning' : ''} />
-        <Stat label="HTTP Conns" value={data.active_conns} />
-        <Stat label="HTTP Traffic" value={fmtBytes(data.total_bytes)} />
-        <Stat label="HTTP Failed" value={data.failed_requests} cls="danger" />
-        <Stat label="SOCKS5 Conns" value={data.socks5_active_conns} />
-        <Stat label="SOCKS5 Traffic" value={fmtBytes(data.socks5_total_bytes)} />
-        <Stat label="SOCKS5 Failed" value={data.socks5_failed_requests} cls="danger" />
-        <Stat label="Max Latency" value={lat(data.max_latency_ms)} />
-        <Stat label="Min Latency" value={lat(data.min_latency_ms)} />
+    <Layout title={m.overview.title} actions={<Btn icon={RefreshCw} onClick={onRefresh}>{m.common.refresh}</Btn>}>
+      {first && <PrefixBody p={first} onRefresh={onRefresh} hero />}
+      {rest.length > 0 && (
+        <div className="prefix-grid">
+          {rest.map((p, i) => (
+            <PrefixBody key={i} p={p} onRefresh={onRefresh} />
+          ))}
+        </div>
+      )}
+      <div className="stat-strip">
+        <Stat label={m.overview.maxIpv6} value={data.max_ipv6} cls="accent" wide />
+        <Stat label={m.overview.stickySessions} value={data.active_sessions} />
+        <Stat label={m.overview.totalRequests} value={data.total_requests} />
+        <Stat label={m.overview.ipv6Direct} value={data.ipv6_direct} cls="success" />
+        <Stat label={m.overview.ipv4Fallback} value={data.ipv4_fallback} cls={data.ipv4_fallback > 0 ? 'warning' : ''} />
+        <Stat label={m.overview.httpConns} value={data.active_conns} />
+        <Stat label={m.overview.httpTraffic} value={fmtBytes(data.total_bytes)} />
+        <Stat label={m.overview.httpFailed} value={data.failed_requests} cls="danger" />
+        <Stat label={m.overview.socksConns} value={data.socks5_active_conns} />
+        <Stat label={m.overview.socksTraffic} value={fmtBytes(data.socks5_total_bytes)} />
+        <Stat label={m.overview.socksFailed} value={data.socks5_failed_requests} cls="danger" />
+        <Stat label={m.overview.maxLatency} value={lat(data.max_latency_ms)} />
+        <Stat label={m.overview.minLatency} value={lat(data.min_latency_ms)} />
       </div>
     </Layout>
   )

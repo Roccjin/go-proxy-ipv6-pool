@@ -1,8 +1,12 @@
 import { useState, useEffect } from 'react'
+import { Activity, ArrowDown, Hexagon, RefreshCw, Trash2 } from 'lucide-react'
 import { TrafficEntry, RateLimitInfo, api } from '../api'
+import { useI18n } from '../i18n'
 import Layout from './Layout'
+import { Btn, Empty } from './ui'
 
 export default function TrafficLog() {
+  const { m, t } = useI18n()
   const [entries, setEntries] = useState<TrafficEntry[]>([])
   const [total, setTotal] = useState(0)
   const [rateInfo, setRateInfo] = useState<RateLimitInfo | null>(null)
@@ -12,40 +16,40 @@ export default function TrafficLog() {
     api.rateLimit().then(setRateInfo)
   }
 
-  useEffect(() => { load(); const t = setInterval(load, 5000); return () => clearInterval(t) }, [])
+  useEffect(() => { load(); const timer = setInterval(load, 5000); return () => clearInterval(timer) }, [])
 
   const handleClear = async () => { await api.clearTrafficLog(); load() }
 
   return (
     <Layout
-      title="Traffic Log"
+      title={m.traffic.title}
       actions={
-        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
           {rateInfo?.enabled && (
-            <span style={{ fontSize: 12, color: '#94a3b8' }}>
-              Rate Limit: {rateInfo.limit} req/{rateInfo.window_sec}s
+            <span className="badge" style={{ color: 'var(--mute)' }}>
+              {t('traffic.rateLimit', { limit: rateInfo.limit ?? 0, window: rateInfo.window_sec ?? 0 })}
             </span>
           )}
-          <span style={{ fontSize: 12, color: '#64748b' }}>{total} total</span>
-          <button className="btn btn-ghost" onClick={load}>Refresh</button>
-          <button className="btn btn-danger" onClick={handleClear}>Clear</button>
+          <span className="badge" style={{ color: 'var(--mute)' }}>{t('traffic.total', { n: total })}</span>
+          <Btn icon={RefreshCw} onClick={load}>{m.common.refresh}</Btn>
+          <Btn variant="danger" icon={Trash2} onClick={handleClear}>{m.common.clear}</Btn>
         </div>
       }
     >
       <table className="data-table">
         <thead>
           <tr>
-            <th>Time</th>
-            <th>User</th>
-            <th>SID</th>
-            <th>Mode</th>
-            <th>Client IP</th>
-            <th>Domain</th>
-            <th>Exit IP</th>
-            <th>Exit</th>
-            <th>Proto</th>
-            <th>Latency</th>
-            <th>Status</th>
+            <th>{m.traffic.time}</th>
+            <th>{m.traffic.user}</th>
+            <th>{m.traffic.sid}</th>
+            <th>{m.traffic.mode}</th>
+            <th>{m.traffic.clientIp}</th>
+            <th>{m.traffic.domain}</th>
+            <th>{m.traffic.exitIp}</th>
+            <th>{m.traffic.exit}</th>
+            <th>{m.traffic.proto}</th>
+            <th>{m.traffic.latency}</th>
+            <th>{m.traffic.status}</th>
           </tr>
         </thead>
         <tbody>
@@ -53,23 +57,27 @@ export default function TrafficLog() {
             <tr key={i}>
               <td className="mono">{e.timestamp.split(' ')[1] || e.timestamp}</td>
               <td>{e.user}</td>
-              <td className="mono">{e.sid || '-'}</td>
-              <td>{e.mode || '-'}</td>
+              <td className="mono">{e.sid || '—'}</td>
+              <td>{e.mode || '—'}</td>
               <td className="mono">{e.client_ip}</td>
               <td>{e.domain}</td>
               <td className="mono" style={{ fontSize: 11 }}>{e.actual_ip || e.exit_ip}</td>
-              <td style={{ color: e.exit_type === 'ipv6' ? '#22c55e' : '#f59e0b', fontSize: 11 }}>
-                {e.exit_type === 'ipv6' ? 'IPv6' : 'v4↓'}
+              <td>
+                {e.exit_type === 'ipv6'
+                  ? <span className="badge ion"><Hexagon size={12} strokeWidth={1.75} /> IPv6</span>
+                  : <span className="badge warn"><ArrowDown size={12} strokeWidth={1.75} /> IPv4</span>}
               </td>
               <td>{e.protocol}</td>
               <td>{e.latency_ms}ms</td>
-              <td style={{ color: e.success ? '#22c55e' : '#ef4444' }}>
-                {e.success ? 'OK' : 'FAIL'}
+              <td>
+                {e.success
+                  ? <span className="badge ion">{m.traffic.ok}</span>
+                  : <span className="badge fail">{m.traffic.fail}</span>}
               </td>
             </tr>
           ))}
           {entries.length === 0 && (
-            <tr><td colSpan={11} style={{ textAlign: 'center', color: '#64748b', padding: 20 }}>No traffic recorded yet</td></tr>
+            <tr><td colSpan={11}><Empty icon={Activity} text={m.traffic.empty} /></td></tr>
           )}
         </tbody>
       </table>
