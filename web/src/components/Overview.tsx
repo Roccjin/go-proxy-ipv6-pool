@@ -72,7 +72,7 @@ function PrefixCard({ p, onRefresh }: { p: PrefixInfo; onRefresh: () => void }) 
         <span className="mono" style={{ color: '#818cf8', fontSize: 12 }}>{p.prefix}</span>
       </div>
       <div className="prefix-meta">
-        <span>{p.count} active</span>
+        <span>on-the-fly</span>
         <span style={{ color: '#475569', fontSize: 11 }}>max: {p.max_capacity}</span>
       </div>
       <div className="prefix-actions">
@@ -116,23 +116,18 @@ function PrefixCard({ p, onRefresh }: { p: PrefixInfo; onRefresh: () => void }) 
 export default function OverviewPanel({ data, onRefresh }: { data: Overview | null; onRefresh: () => void }) {
   if (!data) return null
 
-  const handleExpand = async () => {
-    await api.expandPool()
-    onRefresh()
-  }
-
   const prefixes = data.prefixes ?? []
 
   return (
-    <Layout title="Overview" actions={<><button className="btn btn-ghost" onClick={onRefresh}>Refresh</button><button className="btn btn-expand" onClick={handleExpand}>Expand Pool +100</button></>}>
+    <Layout title="Overview" actions={<><button className="btn btn-ghost" onClick={onRefresh}>Refresh</button></>}>
       <div className="prefix-grid">
         {prefixes.map((p, i) => (
           <PrefixCard key={i} p={p} onRefresh={onRefresh} />
         ))}
       </div>
       <div className="stat-grid">
-        <Stat label="Pool Size" value={data.pool_size} cls="accent" />
-        <Stat label="Active Sessions" value={data.active_sessions} />
+        <Stat label="Max IPv6" value={data.max_ipv6} cls="accent" wide />
+        <Stat label="Sticky Sessions" value={data.active_sessions} />
         <Stat label="Total Requests" value={data.total_requests} />
         <Stat label="IPv6 Direct" value={data.ipv6_direct} cls="success" />
         <Stat label="IPv4 Fallback" value={data.ipv4_fallback} cls={data.ipv4_fallback > 0 ? 'warning' : ''} />

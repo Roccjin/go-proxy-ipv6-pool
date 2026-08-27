@@ -37,6 +37,8 @@ export default function TrafficLog() {
           <tr>
             <th>Time</th>
             <th>User</th>
+            <th>SID</th>
+            <th>Mode</th>
             <th>Client IP</th>
             <th>Domain</th>
             <th>Exit IP</th>
@@ -51,6 +53,8 @@ export default function TrafficLog() {
             <tr key={i}>
               <td className="mono">{e.timestamp.split(' ')[1] || e.timestamp}</td>
               <td>{e.user}</td>
+              <td className="mono">{e.sid || '-'}</td>
+              <td>{e.mode || '-'}</td>
               <td className="mono">{e.client_ip}</td>
               <td>{e.domain}</td>
               <td className="mono" style={{ fontSize: 11 }}>{e.actual_ip || e.exit_ip}</td>
@@ -65,7 +69,7 @@ export default function TrafficLog() {
             </tr>
           ))}
           {entries.length === 0 && (
-            <tr><td colSpan={9} style={{ textAlign: 'center', color: '#64748b', padding: 20 }}>No traffic recorded yet</td></tr>
+            <tr><td colSpan={11} style={{ textAlign: 'center', color: '#64748b', padding: 20 }}>No traffic recorded yet</td></tr>
           )}
         </tbody>
       </table>

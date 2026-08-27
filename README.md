@@ -5,14 +5,14 @@ A high-performance IPv6 proxy pool built with Go. Routes HTTP and SOCKS5 traffic
 ## Features
 
 - **HTTP & SOCKS5 proxy** with IPv6 exit IP binding
-- **Multi-prefix support** — comma-separated IPv6 prefixes, each with independent address pools
-- **Sticky sessions** — consistent exit IP per client fingerprint (configurable TTL)
-- **Domain-based load balancing** — per-domain round-robin or random IP rotation
-- **Rate limiting** — sliding-window per-user request throttling
+- **On-the-fly `/64` exits** — random host bits, not sequential `::1`/`::2`
+- **Username-encoded sessions** — `account_sid_XXXXXXXX_time_10:pass@host:port`
+- **Rotate or sticky** — no `sid` rotates every connection; same `sid` keeps one IP for N minutes (Redis)
+- **Credential generator** — batch-create unlimited usernames without storing them
+- **Rate limiting** — sliding-window per master account
 - **IP ban system** — auto-ban after repeated auth failures, with whitelist support
 - **Traffic logging** — in-memory ring buffer (last 10,000 requests)
-- **Admin panel** — embedded React SPA with real-time monitoring
-- **Single binary** — zero Go dependencies, frontend embedded via `go:embed`
+- **Admin panel** — accounts, generator, sticky sessions, ports
 - **IPv4 fallback** — graceful degradation when target doesn't support IPv6
 
 ## Architecture
@@ -34,9 +34,13 @@ A high-performance IPv6 proxy pool built with Go. Routes HTTP and SOCKS5 traffic
 
 ```
 cmd/server/          → Entry point, CLI flags
-internal/ippool/     → IPv6 address pool, sticky sessions, domain rules
+internal/credential/ → Username protocol (sid/time/mode)
+internal/ipgen/      → Random IPv6 inside a prefix
+internal/store/      → Redis accounts + sticky sessions
+internal/session/    → Rotate vs sticky resolver
+internal/ippool/     → Prefix metadata, local routes, prefix test
 internal/proxy/      → HTTP & SOCKS5 proxy servers
-internal/auth/       → User auth, IP ban/whitelist
+internal/auth/       → IP ban/whitelist
 internal/ratelimit/  → Per-user rate limiting
 internal/trafficlog/ → Request logging
 internal/admin/      → REST API + embedded SPA
@@ -48,6 +52,7 @@ web/                 → React 19 + TypeScript + Vite 6
 ### Prerequisites
 
 - Go 1.21+
+- Redis
 - Node.js 18+ (for frontend build)
 - Linux server with IPv6 tunnel (e.g., [Hurricane Electric TunnelBroker](https://tunnelbroker.net))
 
@@ -87,34 +92,111 @@ ndppd -d -c /etc/ndppd.conf
 
 ```bash
 ./ipv6-proxy \
-  -prefix "2001:db8:abcd" \
-  -count 100 \
+  -prefix "2001:470:24:692::/64" \
+  -redis redis://127.0.0.1:6379/0 \
+  -public-host 45.129.9.171 \
   -proxy-addr 0.0.0.0:8080 \
   -socks5-addr 0.0.0.0:8082 \
   -admin-addr 0.0.0.0:8081 \
-  -proxy-user myuser \
-  -proxy-pass mypass \
+  -proxy-user caomao002 \
+  -proxy-pass Aq112211 \
   -admin-user admin \
   -admin-pass secret
 ```
 
+Do not bind the same inbound port as x-ui/xray. Stop that inbound or pick another port.
+
+### Docker (linux/amd64 + linux/arm64)
+
+Images are multi-arch: **x86_64** (`linux/amd64`) and **ARM64** (`linux/arm64`, Graviton / Apple Silicon / Pi 4+).
+
+The proxy must share the host network namespace. The HE tunnel and `ndppd` stay on the host; the container only runs Redis + this binary, with `NET_ADMIN` so it can add `local` IPv6 routes.
+
+On the **Linux host** (once):
+
+```bash
+sysctl -w net.ipv6.ip_nonlocal_bind=1
+sysctl -w net.ipv6.conf.all.forwarding=1
+# persist in /etc/sysctl.d/99-ipv6-proxy.conf
+```
+
+Copy `docker/env.example` to `.env` and set `PREFIX`, `PUBLIC_HOST`, passwords.
+
+**On the VPS (native arch, recommended):**
+
+```bash
+docker compose build
+docker compose up -d
+```
+
+`docker compose build` on an x86 machine produces amd64; on ARM it produces arm64. No QEMU needed.
+
+**Cross-build both architectures and push:**
+
+```bash
+docker buildx create --name ipv6-proxy-builder --driver docker-container --use
+docker buildx inspect --bootstrap
+
+# registry must allow multi-arch manifests
+IMAGE=ghcr.io/you/ipv6-proxy:latest PUSH=1 ./scripts/docker-build.sh both
+```
+
+Windows (Docker Desktop):
+
+```powershell
+.\scripts\docker-build.ps1 amd64
+# or, after login to a registry:
+$env:IMAGE="ghcr.io/you/ipv6-proxy:latest"; $env:PUSH="1"; .\scripts\docker-build.ps1 both
+```
+
+Bake targets: `local-amd64`, `local-arm64`, `image` (both, needs `--push`).
+
+Then on the server:
+
+```bash
+IMAGE=ghcr.io/you/ipv6-proxy:latest docker compose pull
+IMAGE=ghcr.io/you/ipv6-proxy:latest docker compose up -d
+```
+
+Docker Desktop on Windows/macOS cannot bind the host HE `/64`; run the compose stack on the Linux VPS.
+
 ### Test
 
 ```bash
-# HTTP proxy
-curl -x http://myuser:mypass@localhost:8080 https://api64.ipify.org
+# Rotate — each connection a new IPv6
+curl -x http://caomao002:Aq112211@127.0.0.1:8080 https://ipv6.ip.sb
 
-# SOCKS5 proxy
-curl --socks5 myuser:mypass@localhost:8082 https://api64.ipify.org
+# Sticky 10 minutes — same sid keeps the same IPv6
+curl -x http://caomao002_sid_46916889_time_10:Aq112211@127.0.0.1:8080 https://ipv6.ip.sb
+
+# SOCKS5 sticky
+curl --socks5 caomao002_sid_46916889_time_10:Aq112211@127.0.0.1:8082 https://ipv6.ip.sb
 ```
+
+Username protocol:
+
+```text
+{account}[_sid_{id}][_time_{minutes}][_mode_{rotate|sticky}]
+```
+
+- No `sid` → rotate (new exit IP per connection)
+- `sid` present → sticky; `time` is minutes (1–180, default 10)
+- Password is always the **master account** password
+- Generated `sid` usernames are not stored; Redis only records a sticky mapping on first use
 
 ## Configuration
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `-prefix` | `2001:db8:abcd` | IPv6 prefix(es), comma-separated |
-| `-count` | `100` | Number of addresses per prefix |
-| `-sticky-ttl` | `30m` | Sticky session TTL (`0` = forever) |
+| `-prefix` | `2001:db8:abcd` | IPv6 prefix(es), comma-separated CIDR preferred |
+| `-redis` | `redis://127.0.0.1:6379/0` | Redis URL (required) |
+| `-redis-key-prefix` | `ipv6p:` | Redis key prefix |
+| `-public-host` | (auto) | Host shown in generated credentials |
+| `-default-mode` | `rotate` | Default master-account mode |
+| `-default-ttl` | `10m` | Default sticky duration |
+| `-max-ttl` | `180m` | Max sticky duration |
+| `-count` | `100` | Deprecated (ignored) |
+| `-sticky-ttl` | `30m` | Deprecated (ignored) |
 | `-proxy-addr` | `0.0.0.0:8080` | HTTP proxy listen address |
 | `-socks5-addr` | `0.0.0.0:8082` | SOCKS5 proxy listen address |
 | `-admin-addr` | `0.0.0.0:8081` | Admin panel listen address |
@@ -137,22 +219,24 @@ Access the admin panel at `http://your-server:8081` after starting the service.
 
 **Tabs:**
 
-- **Overview** — real-time stats, prefix cards with enable/disable/test, pool expansion
-- **Domain Rules** — per-domain load balancing (round-robin / random)
-- **Users** — proxy user management with per-user rate limits
-- **Sessions** — sticky session viewer with per-domain latency stats
+- **Overview** — real-time stats, prefix cards with enable/disable/test
+- **Accounts** — master accounts (mode, TTL, rate limit, enable)
+- **Generator** — batch `user:pass@host:port` lines
+- **Sessions** — live Redis sticky sessions, kick to force a new IP
 - **Banned IPs** — auto-ban tracking, manual ban/unban, whitelist
-- **Traffic Log** — last 10,000 requests with export
+- **Traffic Log** — last 10,000 requests
 - **Ports** — dynamic port expansion for HTTP & SOCKS5
+- **Domain Rules** — legacy; not used on the proxy hot path
 
 ## How It Works
 
 1. **TunnelBroker** provides a `/64` IPv6 prefix (2^64 addresses) via a 6in4 (SIT) tunnel
 2. `ip_nonlocal_bind` + local route allows the process to bind to any address in the prefix
-3. Each proxy request exits through a **randomly selected IPv6 address** from the pool
-4. `IP_FREEBIND` and `IP_TRANSPARENT` socket options handle the source IP binding at kernel level
-5. **Sticky sessions** use SHA256(fingerprint) to map clients to consistent exit IPs
-6. **Domain rules** override sticky behavior with round-robin or random rotation per domain
+3. The proxy parses the username, authenticates the **master account**, then:
+   - **rotate**: `crypto/rand` host bits inside the prefix
+   - **sticky**: Redis `GET-or-SET` of `account+sid → exit IP` with a fixed TTL from first use
+4. `IP_FREEBIND` / `IPV6_FREEBIND` bind that address as the TCP source
+5. After sticky TTL expires, the same username gets a **new** IPv6 and a new window
 
 ## Production Tips
 

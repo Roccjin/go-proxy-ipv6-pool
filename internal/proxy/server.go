@@ -2,34 +2,19 @@ package proxy
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net"
 	"net/http"
-	"regexp"
 	"strings"
 	"sync/atomic"
 	"time"
 
 	"ipv6-proxy/internal/auth"
-	"ipv6-proxy/internal/ippool"
-	"ipv6-proxy/internal/ratelimit"
 	"ipv6-proxy/internal/trafficlog"
 )
-
-var machineIDRe = regexp.MustCompile(`[0-9a-fA-F]{64}`)
-
-type Server struct {
-	pool       *ippool.Pool
-	auth       *auth.Manager
-	ipBan      *auth.IPBan
-	limiter    *ratelimit.Limiter
-	tlog       *trafficlog.Logger
-	listenAddr string
-	stats      Stats
-	httpServer *http.Server
-}
 
 type Stats struct {
 	ActiveConns      atomic.Int64
@@ -39,13 +24,16 @@ type Stats struct {
 	IPv4Fallback     atomic.Int64
 }
 
-func NewServer(listenAddr string, pool *ippool.Pool, authMgr *auth.Manager, ipBan *auth.IPBan, limiter *ratelimit.Limiter, tlog *trafficlog.Logger) *Server {
+type Server struct {
+	rt         *Runtime
+	listenAddr string
+	stats      Stats
+	httpServer *http.Server
+}
+
+func NewServer(listenAddr string, rt *Runtime) *Server {
 	return &Server{
-		pool:       pool,
-		auth:       authMgr,
-		ipBan:      ipBan,
-		limiter:    limiter,
-		tlog:       tlog,
+		rt:         rt,
 		listenAddr: listenAddr,
 	}
 }
@@ -76,44 +64,45 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer s.stats.ActiveConns.Add(-1)
 
 	clientIP := r.RemoteAddr
-	if s.ipBan.IsBanned(clientIP) {
+	if s.rt.IPBan.IsBanned(clientIP) {
 		http.Error(w, "Forbidden", http.StatusForbidden)
 		return
 	}
 
 	user, pass, ok := auth.ParseProxyAuth(r)
 	if !ok {
-		// No auth header — standard 407 challenge, NOT a failure.
-		// HTTP clients send unauthenticated first, then retry with creds.
 		w.Header().Set("Proxy-Authenticate", `Basic realm="IPv6 Proxy"`)
 		http.Error(w, "Proxy Authentication Required", http.StatusProxyAuthRequired)
 		return
 	}
 
-	// Extract machine_id from username: "proxy-mid_<64hex>" → realUser="proxy", mid="<64hex>"
-	realUser, mid := parseMachineUser(user)
-
-	if !s.auth.Validate(realUser, pass) {
-		s.ipBan.RecordFailure(clientIP)
+	admitted, err := s.rt.Admit(r.Context(), user, pass, extraSIDFromHeaders(r.Header))
+	if errors.Is(err, ErrAuth) {
+		s.rt.IPBan.RecordFailure(clientIP)
 		w.Header().Set("Proxy-Authenticate", `Basic realm="IPv6 Proxy"`)
 		http.Error(w, "Proxy Authentication Required", http.StatusProxyAuthRequired)
 		s.stats.FailedRequests.Add(1)
 		return
 	}
-
-	// Rate limit per user
-	if s.limiter != nil && !s.limiter.Allow(realUser) {
+	if errors.Is(err, ErrRate) {
 		http.Error(w, "Rate limit exceeded", http.StatusTooManyRequests)
 		s.stats.FailedRequests.Add(1)
 		return
 	}
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		s.stats.FailedRequests.Add(1)
+		return
+	}
 
-	fingerprint := s.extractFingerprint(r, realUser, mid)
+	exitIP := net.ParseIP(admitted.ExitIP)
+	if exitIP == nil {
+		http.Error(w, "invalid exit ip", http.StatusBadGateway)
+		s.stats.FailedRequests.Add(1)
+		return
+	}
+
 	domain := extractHost(r.Host)
-
-	// Resolve sticky IP (latency=0 for now, will record after request)
-	exitIP := s.pool.Resolve(fingerprint, domain, 0)
-
 	start := time.Now()
 	var reqErr error
 	var dialRes DialResult
@@ -125,15 +114,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	latency := time.Since(start)
-
-	// Record latency stats only — don't trigger domain rule selection again
-	s.pool.RecordLatency(fingerprint, domain, latency)
-
 	if reqErr != nil {
 		s.stats.FailedRequests.Add(1)
 	}
 
-	// Track IPv6 vs IPv4 fallback
 	exitType := "ipv6"
 	actualIP := exitIP.String()
 	if dialRes.Conn != nil || reqErr == nil {
@@ -148,10 +132,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Traffic log
-	if s.tlog != nil {
-		s.tlog.Record(trafficlog.Entry{
-			User:      realUser,
+	if s.rt.TLog != nil {
+		s.rt.TLog.Record(trafficlog.Entry{
+			User:      admitted.Parsed.Account,
 			ClientIP:  clientIP,
 			Domain:    domain,
 			ExitIP:    exitIP.String(),
@@ -160,26 +143,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			Protocol:  "http",
 			LatencyMs: latency.Milliseconds(),
 			Success:   reqErr == nil,
+			SID:       admitted.Parsed.SID,
+			Mode:      string(admitted.Parsed.Mode),
+			TTLMin:    admitted.Parsed.TTLMinutes,
 		})
 	}
-}
-
-func (s *Server) extractFingerprint(r *http.Request, user string, mid string) string {
-	if fp := r.Header.Get("X-Fingerprint"); fp != "" {
-		return fp
-	}
-	// machine_id from username takes highest priority
-	if mid != "" {
-		return "mid:" + mid
-	}
-	// fallback: check UA headers
-	if midUA := extractMachineID(r); midUA != "" {
-		return "mid:" + midUA
-	}
-	if key := r.Header.Get("X-Sticky-Key"); key != "" {
-		return "sticky:" + key
-	}
-	return user + ":" + extractHost(r.Host)
 }
 
 func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request, exitIP net.IP) (DialResult, error) {
@@ -333,32 +301,6 @@ func (s *Server) GetStats() map[string]int64 {
 		"ipv6_direct":     s.stats.IPv6Direct.Load(),
 		"ipv4_fallback":   s.stats.IPv4Fallback.Load(),
 	}
-}
-
-// parseMachineUser splits "user-mid_<64hex>" into (user, mid).
-// Plain username like "proxy" returns ("proxy", "").
-func parseMachineUser(user string) (string, string) {
-	const sep = "-mid_"
-	idx := strings.Index(user, sep)
-	if idx < 0 {
-		return user, ""
-	}
-	mid := user[idx+len(sep):]
-	if len(mid) == 64 && machineIDRe.MatchString(mid) {
-		return user[:idx], strings.ToLower(mid)
-	}
-	return user, ""
-}
-
-func extractMachineID(r *http.Request) string {
-	for _, h := range []string{"User-Agent", "X-Amz-User-Agent"} {
-		if v := r.Header.Get(h); v != "" {
-			if mid := machineIDRe.FindString(v); mid != "" {
-				return strings.ToLower(mid)
-			}
-		}
-	}
-	return ""
 }
 
 func extractHost(host string) string {

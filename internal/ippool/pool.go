@@ -15,6 +15,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"ipv6-proxy/internal/ipgen"
 )
 
 type Strategy int
@@ -239,6 +241,28 @@ func (p *Pool) Lookup(fingerprint string) (net.IP, bool) {
 }
 
 func (p *Pool) Count() int { return len(p.addrs) }
+
+// EnabledPrefixes returns CIDR prefixes that may be used for on-the-fly exit IPs.
+func (p *Pool) EnabledPrefixes() []ipgen.Prefix {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	out := make([]ipgen.Prefix, 0, len(p.prefixes))
+	for _, pi := range p.prefixes {
+		if !pi.Enabled {
+			continue
+		}
+		spec := pi.Prefix
+		if !strings.Contains(spec, "/") {
+			spec = fmt.Sprintf("%s/%d", spec, pi.Bits)
+		}
+		px, err := ipgen.ParsePrefix(spec)
+		if err != nil {
+			continue
+		}
+		out = append(out, px)
+	}
+	return out
+}
 
 // Prefixes returns metadata about all prefixes in the pool.
 func (p *Pool) Prefixes() []PrefixInfo {

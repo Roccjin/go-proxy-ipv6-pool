@@ -19,6 +19,9 @@ type Entry struct {
 	Protocol  string `json:"protocol"`            // "http" or "socks5"
 	LatencyMs int64  `json:"latency_ms"`
 	Success   bool   `json:"success"`
+	SID       string `json:"sid,omitempty"`
+	Mode      string `json:"mode,omitempty"`
+	TTLMin    int    `json:"ttl_min,omitempty"`
 }
 
 // Logger stores traffic log entries in memory with a max cap, and can persist to file.

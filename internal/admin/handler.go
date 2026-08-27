@@ -17,12 +17,31 @@ import (
 	"ipv6-proxy/internal/ippool"
 	"ipv6-proxy/internal/proxy"
 	"ipv6-proxy/internal/ratelimit"
+	"ipv6-proxy/internal/store"
 	"ipv6-proxy/internal/trafficlog"
 )
 
+type Deps struct {
+	Pool           *ippool.Pool
+	Store          *store.Store
+	IPBan          *auth.IPBan
+	Limiter        *ratelimit.Limiter
+	TLog           *trafficlog.Logger
+	PortMgr        *proxy.PortManager
+	AdminUser      string
+	AdminPass      string
+	GetStats       func() map[string]int64
+	GetSocks5Stats func() map[string]int64
+	StaticFS       fs.FS
+	RulesFile      string
+	PublicHost     string
+	HTTPAddr       string
+	SOCKS5Addr     string
+}
+
 type Handler struct {
 	pool           *ippool.Pool
-	authMgr        *auth.Manager
+	store          *store.Store
 	ipBan          *auth.IPBan
 	limiter        *ratelimit.Limiter
 	tlog           *trafficlog.Logger
@@ -34,29 +53,34 @@ type Handler struct {
 	startTime      time.Time
 	staticFS       fs.FS
 	rulesFile      string
-	// session tokens
-	mu       sync.RWMutex
-	sessions map[string]time.Time // token -> expiry
+	publicHost     string
+	httpAddr       string
+	socks5Addr     string
+	mu             sync.RWMutex
+	sessions       map[string]time.Time
 }
 
 const sessionTTL = 24 * time.Hour
 const cookieName = "admin_session"
 
-func New(pool *ippool.Pool, authMgr *auth.Manager, ipBan *auth.IPBan, limiter *ratelimit.Limiter, tlog *trafficlog.Logger, portMgr *proxy.PortManager, adminUser, adminPass string, statsFn func() map[string]int64, socks5StatsFn func() map[string]int64, staticFS fs.FS, rulesFile string) *Handler {
+func New(d Deps) *Handler {
 	return &Handler{
-		pool:           pool,
-		authMgr:        authMgr,
-		ipBan:          ipBan,
-		limiter:        limiter,
-		tlog:           tlog,
-		portMgr:        portMgr,
-		adminUser:      adminUser,
-		adminPass:      adminPass,
-		getStats:       statsFn,
-		getSocks5Stats: socks5StatsFn,
+		pool:           d.Pool,
+		store:          d.Store,
+		ipBan:          d.IPBan,
+		limiter:        d.Limiter,
+		tlog:           d.TLog,
+		portMgr:        d.PortMgr,
+		adminUser:      d.AdminUser,
+		adminPass:      d.AdminPass,
+		getStats:       d.GetStats,
+		getSocks5Stats: d.GetSocks5Stats,
 		startTime:      time.Now(),
-		staticFS:       staticFS,
-		rulesFile:      rulesFile,
+		staticFS:       d.StaticFS,
+		rulesFile:      d.RulesFile,
+		publicHost:     d.PublicHost,
+		httpAddr:       d.HTTPAddr,
+		socks5Addr:     d.SOCKS5Addr,
 		sessions:       make(map[string]time.Time),
 	}
 }
@@ -70,13 +94,20 @@ func (h *Handler) Start(addr string) error {
 	// Protected API routes
 	mux.HandleFunc("/api/logout", h.requireAuth(h.apiLogout))
 	mux.HandleFunc("/api/overview", h.requireAuth(h.apiOverview))
-	mux.HandleFunc("/api/sessions", h.requireAuth(h.apiSessions))
-	mux.HandleFunc("/api/sessions/clear", h.requireAuth(h.apiClearSessions))
-	mux.HandleFunc("/api/sessions/remove", h.requireAuth(h.apiRemoveSession))
-	mux.HandleFunc("/api/users", h.requireAuth(h.apiUsers))
-	mux.HandleFunc("/api/users/add", h.requireAuth(h.apiAddUser))
-	mux.HandleFunc("/api/users/remove", h.requireAuth(h.apiRemoveUser))
-	mux.HandleFunc("/api/users/rate-limit", h.requireAuth(h.apiSetUserRateLimit))
+	mux.HandleFunc("/api/sessions", h.requireAuth(h.apiStickySessions))
+	mux.HandleFunc("/api/sessions/clear", h.requireAuth(h.apiClearStickySessions))
+	mux.HandleFunc("/api/sessions/remove", h.requireAuth(h.apiRemoveStickySession))
+	mux.HandleFunc("/api/sticky-sessions", h.requireAuth(h.apiStickySessions))
+	mux.HandleFunc("/api/sticky-sessions/delete", h.requireAuth(h.apiRemoveStickySession))
+	mux.HandleFunc("/api/users", h.requireAuth(h.apiAccounts))
+	mux.HandleFunc("/api/users/add", h.requireAuth(h.apiAddAccount))
+	mux.HandleFunc("/api/users/remove", h.requireAuth(h.apiRemoveAccount))
+	mux.HandleFunc("/api/users/rate-limit", h.requireAuth(h.apiPatchAccount))
+	mux.HandleFunc("/api/accounts", h.requireAuth(h.apiAccounts))
+	mux.HandleFunc("/api/accounts/add", h.requireAuth(h.apiAddAccount))
+	mux.HandleFunc("/api/accounts/update", h.requireAuth(h.apiPatchAccount))
+	mux.HandleFunc("/api/accounts/remove", h.requireAuth(h.apiRemoveAccount))
+	mux.HandleFunc("/api/credentials/generate", h.requireAuth(h.apiGenerateCredentials))
 	mux.HandleFunc("/api/banned", h.requireAuth(h.apiBanned))
 	mux.HandleFunc("/api/banned/unban", h.requireAuth(h.apiUnban))
 	mux.HandleFunc("/api/banned/ban", h.requireAuth(h.apiBan))
@@ -238,31 +269,17 @@ func fmtDuration(d time.Duration) string {
 	return fmt.Sprintf("%dm%ds", m, s)
 }
 
-type sessionResp struct {
-	Fingerprint string       `json:"fingerprint"`
-	ExitIP      string       `json:"exit_ip"`
-	ExitIPs     []string     `json:"exit_ips"`
-	TotalHits   int64        `json:"total_hits"`
-	MaxLatMs    int64        `json:"max_lat_ms"`
-	MinLatMs    int64        `json:"min_lat_ms"`
-	AvgLatMs    int64        `json:"avg_lat_ms"`
-	CreatedAt   string       `json:"created_at"`
-	LastSeen    string       `json:"last_seen"`
-	Domains     []domainResp `json:"domains"`
-}
-
-type domainResp struct {
-	Domain   string `json:"domain"`
-	Hits     int64  `json:"hits"`
-	MaxLatMs int64  `json:"max_lat_ms"`
-	MinLatMs int64  `json:"min_lat_ms"`
-	LastSeen string `json:"last_seen"`
-}
-
 func (h *Handler) apiOverview(w http.ResponseWriter, r *http.Request) {
 	totalReqs, maxLat, minLat := h.pool.GlobalStats()
+	if h.tlog != nil {
+		totalReqs = int64(h.tlog.Count())
+	}
 	stats := h.getStats()
 	s5stats := h.getSocks5Stats()
+	activeSess := 0
+	if n, err := h.store.StickyCount(r.Context()); err == nil {
+		activeSess = n
+	}
 	writeJSON(w, map[string]interface{}{
 		"uptime_seconds":       int(time.Since(h.startTime).Seconds()),
 		"uptime_str":           fmtDuration(time.Since(h.startTime)),
@@ -271,7 +288,7 @@ func (h *Handler) apiOverview(w http.ResponseWriter, r *http.Request) {
 		"prefix":               h.pool.Prefix(),
 		"prefix_bits":          h.pool.PrefixBits(),
 		"max_ipv6":             h.pool.MaxCapacity(),
-		"active_sessions":      h.pool.SessionCount(),
+		"active_sessions":      activeSess,
 		"total_requests":       totalReqs,
 		"active_conns":         stats["active_conns"],
 		"total_bytes":          stats["total_bytes"],
@@ -286,110 +303,7 @@ func (h *Handler) apiOverview(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (h *Handler) apiSessions(w http.ResponseWriter, r *http.Request) {
-	sessions := h.pool.Sessions()
-	out := make([]sessionResp, 0, len(sessions))
-	for _, s := range sessions {
-		domains := make([]domainResp, 0, len(s.Domains))
-		for _, d := range s.Domains {
-			domains = append(domains, domainResp{
-				Domain:   d.Domain,
-				Hits:     d.Hits,
-				MaxLatMs: d.MaxLatency.Milliseconds(),
-				MinLatMs: d.MinLatency.Milliseconds(),
-				LastSeen: d.LastSeen.Format("15:04:05"),
-			})
-		}
-		exitIPs := make([]string, 0, len(s.ExitIPs))
-		for ip := range s.ExitIPs {
-			exitIPs = append(exitIPs, ip)
-		}
-		out = append(out, sessionResp{
-			Fingerprint: s.Fingerprint,
-			ExitIP:      s.ExitIP.String(),
-			ExitIPs:     exitIPs,
-			TotalHits:   s.TotalHits,
-			MaxLatMs:    s.MaxLatency.Milliseconds(),
-			MinLatMs:    s.MinLatency.Milliseconds(),
-			AvgLatMs:    s.AvgLatency.Milliseconds(),
-			CreatedAt:   s.CreatedAt.Format("15:04:05"),
-			LastSeen:    s.LastSeen.Format("15:04:05"),
-			Domains:     domains,
-		})
-	}
-	writeJSON(w, out)
-}
 
-func (h *Handler) apiClearSessions(w http.ResponseWriter, r *http.Request) {
-	h.pool.ClearSessions()
-	writeJSON(w, map[string]string{"status": "ok"})
-}
-
-func (h *Handler) apiRemoveSession(w http.ResponseWriter, r *http.Request) {
-	var req struct{ Fingerprint string `json:"fingerprint"` }
-	json.NewDecoder(r.Body).Decode(&req)
-	h.pool.RemoveSession(req.Fingerprint)
-	writeJSON(w, map[string]string{"status": "ok"})
-}
-
-func (h *Handler) apiUsers(w http.ResponseWriter, r *http.Request) {
-	users := h.authMgr.ListUsers()
-	type userInfo struct {
-		User      string `json:"user"`
-		RateLimit int    `json:"rate_limit"`
-	}
-	out := make([]userInfo, 0, len(users))
-	for _, u := range users {
-		rl := 0
-		if h.limiter != nil {
-			rl = h.limiter.UserLimit(u)
-		}
-		out = append(out, userInfo{User: u, RateLimit: rl})
-	}
-	writeJSON(w, map[string]interface{}{"users": out})
-}
-
-func (h *Handler) apiAddUser(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		User string `json:"user"`
-		Pass string `json:"pass"`
-	}
-	json.NewDecoder(r.Body).Decode(&req)
-	h.authMgr.AddUser(req.User, req.Pass)
-	writeJSON(w, map[string]string{"status": "ok"})
-}
-
-func (h *Handler) apiRemoveUser(w http.ResponseWriter, r *http.Request) {
-	var req struct{ User string `json:"user"` }
-	json.NewDecoder(r.Body).Decode(&req)
-	h.authMgr.RemoveUser(req.User)
-	// Also remove per-user rate limit
-	if h.limiter != nil {
-		h.limiter.SetUserLimit(req.User, 0)
-	}
-	writeJSON(w, map[string]string{"status": "ok"})
-}
-
-func (h *Handler) apiSetUserRateLimit(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "POST only", http.StatusMethodNotAllowed)
-		return
-	}
-	var req struct {
-		User  string `json:"user"`
-		Limit int    `json:"limit"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
-		return
-	}
-	if h.limiter == nil {
-		writeJSON(w, map[string]string{"status": "error", "message": "rate limiting disabled"})
-		return
-	}
-	h.limiter.SetUserLimit(req.User, req.Limit)
-	writeJSON(w, map[string]string{"status": "ok"})
-}
 
 func (h *Handler) apiBanned(w http.ResponseWriter, r *http.Request) {
 	banned := h.ipBan.BannedList()

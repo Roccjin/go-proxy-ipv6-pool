@@ -34,7 +34,7 @@ export default function DomainRules({ flash }: { flash: (msg: string) => void })
   }
 
   return (
-    <Layout title="Domain Rules" actions={<button className="btn btn-ghost" onClick={load}>Refresh</button>}>
+    <Layout title="Domain Rules (legacy, not used on proxy hot path)" actions={<button className="btn btn-ghost" onClick={load}>Refresh</button>}>
       <table className="data-table">
         <thead>
           <tr><th>Domain</th><th>Exit Count</th><th>Strategy</th><th>Action</th></tr>

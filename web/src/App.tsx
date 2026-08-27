@@ -9,8 +9,9 @@ import BannedIPs from './components/BannedIPs'
 import TrafficLog from './components/TrafficLog'
 import Ports from './components/Ports'
 import Login from './components/Login'
+import Generator from './components/Generator'
 
-type Tab = 'overview' | 'domains' | 'users' | 'sessions' | 'banned' | 'traffic' | 'ports'
+type Tab = 'overview' | 'domains' | 'users' | 'generator' | 'sessions' | 'banned' | 'traffic' | 'ports'
 
 export default function App() {
   const [authed, setAuthed] = useState<boolean | null>(null)
@@ -71,7 +72,8 @@ export default function App() {
   const tabs: { key: Tab; label: string }[] = [
     { key: 'overview', label: 'Overview' },
     { key: 'domains', label: 'Domain Rules' },
-    { key: 'users', label: 'Users' },
+    { key: 'users', label: 'Accounts' },
+    { key: 'generator', label: 'Generator' },
     { key: 'sessions', label: 'Sessions' },
     { key: 'banned', label: 'Banned IPs' },
     { key: 'traffic', label: 'Traffic Log' },
@@ -92,6 +94,7 @@ export default function App() {
       {tab === 'overview' && <OverviewPanel data={overview} onRefresh={refresh} />}
       {tab === 'domains' && <DomainRules flash={flash} />}
       {tab === 'users' && <ProxyUsers flash={flash} />}
+      {tab === 'generator' && <Generator flash={flash} />}
       {tab === 'sessions' && <Sessions flash={flash} />}
       {tab === 'banned' && <BannedIPs flash={flash} />}
       {tab === 'traffic' && <TrafficLog />}

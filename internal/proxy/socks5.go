@@ -3,15 +3,13 @@ package proxy
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net"
 	"time"
 
-	"ipv6-proxy/internal/auth"
-	"ipv6-proxy/internal/ippool"
-	"ipv6-proxy/internal/ratelimit"
 	"ipv6-proxy/internal/trafficlog"
 )
 
@@ -35,23 +33,15 @@ const (
 
 type Socks5Server struct {
 	listenAddr string
-	pool       *ippool.Pool
-	auth       *auth.Manager
-	ipBan      *auth.IPBan
-	limiter    *ratelimit.Limiter
-	tlog       *trafficlog.Logger
+	rt         *Runtime
 	stats      Stats
 	listener   net.Listener
 }
 
-func NewSocks5Server(listenAddr string, pool *ippool.Pool, authMgr *auth.Manager, ipBan *auth.IPBan, limiter *ratelimit.Limiter, tlog *trafficlog.Logger) *Socks5Server {
+func NewSocks5Server(listenAddr string, rt *Runtime) *Socks5Server {
 	return &Socks5Server{
 		listenAddr: listenAddr,
-		pool:       pool,
-		auth:       authMgr,
-		ipBan:      ipBan,
-		limiter:    limiter,
-		tlog:       tlog,
+		rt:         rt,
 	}
 }
 
@@ -106,49 +96,41 @@ func (s *Socks5Server) handleConn(conn net.Conn) {
 	defer s.stats.ActiveConns.Add(-1)
 
 	clientIP := conn.RemoteAddr().String()
-	if s.ipBan.IsBanned(clientIP) {
+	if s.rt.IPBan.IsBanned(clientIP) {
 		return
 	}
 
 	conn.SetDeadline(time.Now().Add(30 * time.Second))
 
-	user, mid, err := s.negotiate(conn, clientIP)
+	admitted, err := s.negotiate(conn, clientIP)
 	if err != nil {
-		s.stats.FailedRequests.Add(1)
-		return
-	}
-
-	// Rate limit per user
-	if s.limiter != nil && !s.limiter.Allow(user) {
 		s.stats.FailedRequests.Add(1)
 		return
 	}
 
 	conn.SetDeadline(time.Time{}) // clear deadline for relay
 
-	s.handleRequest(conn, user, mid, clientIP)
+	s.handleRequest(conn, admitted, clientIP)
 }
 
 // SOCKS5_NEGOTIATE_PLACEHOLDER
 
 // negotiate handles SOCKS5 version negotiation and authentication.
 // Returns (realUser, machineID, error).
-func (s *Socks5Server) negotiate(conn net.Conn, clientIP string) (string, string, error) {
-	// Read version + number of methods
+func (s *Socks5Server) negotiate(conn net.Conn, clientIP string) (AdmitResult, error) {
 	buf := make([]byte, 2)
 	if _, err := io.ReadFull(conn, buf); err != nil {
-		return "", "", err
+		return AdmitResult{}, err
 	}
 	if buf[0] != socks5Version {
-		return "", "", fmt.Errorf("unsupported SOCKS version: %d", buf[0])
+		return AdmitResult{}, fmt.Errorf("unsupported SOCKS version: %d", buf[0])
 	}
 	nMethods := int(buf[1])
 	methods := make([]byte, nMethods)
 	if _, err := io.ReadFull(conn, methods); err != nil {
-		return "", "", err
+		return AdmitResult{}, err
 	}
 
-	// We require username/password auth
 	hasUserPass := false
 	for _, m := range methods {
 		if m == authUserPass {
@@ -158,54 +140,51 @@ func (s *Socks5Server) negotiate(conn net.Conn, clientIP string) (string, string
 	}
 	if !hasUserPass {
 		conn.Write([]byte{socks5Version, authNoAccept})
-		return "", "", fmt.Errorf("client does not support username/password auth")
+		return AdmitResult{}, fmt.Errorf("client does not support username/password auth")
 	}
 	conn.Write([]byte{socks5Version, authUserPass})
 
 	return s.authenticate(conn, clientIP)
 }
 
-// authenticate performs RFC 1929 username/password authentication.
-func (s *Socks5Server) authenticate(conn net.Conn, clientIP string) (string, string, error) {
-	// RFC 1929: version(1) + ulen(1) + user(ulen) + plen(1) + pass(plen)
+func (s *Socks5Server) authenticate(conn net.Conn, clientIP string) (AdmitResult, error) {
 	buf := make([]byte, 2)
 	if _, err := io.ReadFull(conn, buf); err != nil {
-		return "", "", err
+		return AdmitResult{}, err
 	}
-	// buf[0] is sub-negotiation version (0x01)
 	uLen := int(buf[1])
 	userBuf := make([]byte, uLen)
 	if _, err := io.ReadFull(conn, userBuf); err != nil {
-		return "", "", err
+		return AdmitResult{}, err
 	}
 
 	pLenBuf := make([]byte, 1)
 	if _, err := io.ReadFull(conn, pLenBuf); err != nil {
-		return "", "", err
+		return AdmitResult{}, err
 	}
 	pLen := int(pLenBuf[0])
 	passBuf := make([]byte, pLen)
 	if _, err := io.ReadFull(conn, passBuf); err != nil {
-		return "", "", err
+		return AdmitResult{}, err
 	}
 
-	user := string(userBuf)
-	pass := string(passBuf)
-
-	realUser, mid := parseMachineUser(user)
-	if !s.auth.Validate(realUser, pass) {
-		conn.Write([]byte{0x01, 0x01}) // auth failure
-		s.ipBan.RecordFailure(clientIP)
-		return "", "", fmt.Errorf("auth failed for %s", realUser)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	admitted, err := s.rt.Admit(ctx, string(userBuf), string(passBuf), "")
+	if err != nil {
+		conn.Write([]byte{0x01, 0x01})
+		if errors.Is(err, ErrAuth) {
+			s.rt.IPBan.RecordFailure(clientIP)
+		}
+		return AdmitResult{}, err
 	}
-	conn.Write([]byte{0x01, 0x00}) // auth success
-	return realUser, mid, nil
+	conn.Write([]byte{0x01, 0x00})
+	return admitted, nil
 }
 
 // SOCKS5_REQUEST_PLACEHOLDER
 
-func (s *Socks5Server) handleRequest(conn net.Conn, user, mid, clientIP string) {
-	// Read request: ver(1) + cmd(1) + rsv(1) + atyp(1)
+func (s *Socks5Server) handleRequest(conn net.Conn, admitted AdmitResult, clientIP string) {
 	header := make([]byte, 4)
 	if _, err := io.ReadFull(conn, header); err != nil {
 		return
@@ -221,7 +200,6 @@ func (s *Socks5Server) handleRequest(conn net.Conn, user, mid, clientIP string) 
 		return
 	}
 
-	// Parse target address
 	targetHost, targetPort, err := s.readAddress(conn, header[3])
 	if err != nil {
 		s.sendReply(conn, repAddrNotSupp, nil, 0)
@@ -229,42 +207,46 @@ func (s *Socks5Server) handleRequest(conn net.Conn, user, mid, clientIP string) 
 		return
 	}
 
-	// Build fingerprint: mid takes priority, fallback to user:host
-	var fingerprint string
-	if mid != "" {
-		fingerprint = "mid:" + mid
-	} else {
-		fingerprint = user + ":" + targetHost
+	exitIP := net.ParseIP(admitted.ExitIP)
+	if exitIP == nil {
+		s.sendReply(conn, repGeneralFail, nil, 0)
+		s.stats.FailedRequests.Add(1)
+		return
 	}
 
 	domain := targetHost
-	exitIP := s.pool.Resolve(fingerprint, domain, 0)
-
 	addr := net.JoinHostPort(targetHost, fmt.Sprintf("%d", targetPort))
 	start := time.Now()
+
+	logEntry := func(success bool, exitType, actualIP string, latency time.Duration) {
+		if s.rt.TLog == nil {
+			return
+		}
+		s.rt.TLog.Record(trafficlog.Entry{
+			User:      admitted.Parsed.Account,
+			ClientIP:  clientIP,
+			Domain:    domain,
+			ExitIP:    exitIP.String(),
+			ActualIP:  actualIP,
+			ExitType:  exitType,
+			Protocol:  "socks5",
+			LatencyMs: latency.Milliseconds(),
+			Success:   success,
+			SID:       admitted.Parsed.SID,
+			Mode:      string(admitted.Parsed.Mode),
+			TTLMin:    admitted.Parsed.TTLMinutes,
+		})
+	}
 
 	dr, err := dialTarget(context.Background(), addr, exitIP)
 	if err != nil {
 		s.sendReply(conn, repGeneralFail, nil, 0)
 		s.stats.FailedRequests.Add(1)
-		s.pool.RecordLatency(fingerprint, domain, time.Since(start))
-		if s.tlog != nil {
-			s.tlog.Record(trafficlog.Entry{
-				User:      user,
-				ClientIP:  clientIP,
-				Domain:    domain,
-				ExitIP:    exitIP.String(),
-				ExitType:  "ipv6",
-				Protocol:  "socks5",
-				LatencyMs: time.Since(start).Milliseconds(),
-				Success:   false,
-			})
-		}
+		logEntry(false, "ipv6", exitIP.String(), time.Since(start))
 		return
 	}
 	defer dr.Conn.Close()
 
-	// Track IPv6 vs IPv4 fallback
 	exitType := "ipv6"
 	actualIP := exitIP.String()
 	if dr.IsIPv6 {
@@ -277,28 +259,10 @@ func (s *Socks5Server) handleRequest(conn net.Conn, user, mid, clientIP string) 
 		actualIP = dr.LocalIP
 	}
 
-	// Send success reply with bound address
 	localAddr := dr.Conn.LocalAddr().(*net.TCPAddr)
 	s.sendReply(conn, repSuccess, localAddr.IP, uint16(localAddr.Port))
 
-	latency := time.Since(start)
-	s.pool.RecordLatency(fingerprint, domain, latency)
-
-	if s.tlog != nil {
-		s.tlog.Record(trafficlog.Entry{
-			User:      user,
-			ClientIP:  clientIP,
-			Domain:    domain,
-			ExitIP:    exitIP.String(),
-			ActualIP:  actualIP,
-			ExitType:  exitType,
-			Protocol:  "socks5",
-			LatencyMs: latency.Milliseconds(),
-			Success:   true,
-		})
-	}
-
-	// Relay data
+	logEntry(true, exitType, actualIP, time.Since(start))
 	s.relay(conn, dr.Conn)
 }
 

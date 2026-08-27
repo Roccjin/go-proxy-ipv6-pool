@@ -36,3 +36,11 @@ CLAUDE.md
 
 # Generated articles
 *.docx
+
+# Local AI/tooling state
+/.claude/
+.ace-tool/
+.agents/
+.codex/
+.grok/
+.trellis/

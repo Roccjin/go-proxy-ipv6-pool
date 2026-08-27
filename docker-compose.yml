@@ -1,0 +1,57 @@
+# IPv6 exit IPs need the host network namespace (HE tunnel, ndppd, FREEBIND).
+# Host sysctl (set on the Linux host, not in this file):
+#   sysctl -w net.ipv6.ip_nonlocal_bind=1
+#   sysctl -w net.ipv6.conf.all.forwarding=1
+# ndppd and the SIT/HE tunnel stay on the host.
+
+services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    network_mode: host
+    command:
+      - redis-server
+      - --bind
+      - 127.0.0.1
+      - --port
+      - "6379"
+      - --appendonly
+      - "yes"
+    volumes:
+      - redis-data:/data
+
+  proxy:
+    image: ${IMAGE:-ipv6-proxy:local}
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    network_mode: host
+    depends_on:
+      - redis
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    environment:
+      PREFIX: ${PREFIX:-2001:db8:abcd}
+      REDIS_URL: ${REDIS_URL:-redis://127.0.0.1:6379/0}
+      REDIS_KEY_PREFIX: ${REDIS_KEY_PREFIX:-ipv6p:}
+      PUBLIC_HOST: ${PUBLIC_HOST:-}
+      PROXY_ADDR: ${PROXY_ADDR:-0.0.0.0:8080}
+      SOCKS5_ADDR: ${SOCKS5_ADDR:-0.0.0.0:8082}
+      ADMIN_ADDR: ${ADMIN_ADDR:-0.0.0.0:8081}
+      PROXY_USER: ${PROXY_USER:-proxy}
+      PROXY_PASS: ${PROXY_PASS:-proxy123}
+      ADMIN_USER: ${ADMIN_USER:-admin}
+      ADMIN_PASS: ${ADMIN_PASS:-admin123}
+      DATA_DIR: /etc/ipv6-proxy
+      RATE_LIMIT: ${RATE_LIMIT:-500}
+      DEFAULT_MODE: ${DEFAULT_MODE:-rotate}
+      DEFAULT_TTL: ${DEFAULT_TTL:-10m}
+      MAX_TTL: ${MAX_TTL:-180m}
+    volumes:
+      - proxy-data:/etc/ipv6-proxy
+
+volumes:
+  redis-data:
+  proxy-data:

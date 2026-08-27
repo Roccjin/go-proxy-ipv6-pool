@@ -49,16 +49,15 @@ export interface DomainDetail {
 }
 
 export interface Session {
-  fingerprint: string;
+  account: string;
+  sid: string;
   exit_ip: string;
-  exit_ips: string[];
-  total_hits: number;
-  max_lat_ms: number;
-  min_lat_ms: number;
-  avg_lat_ms: number;
+  prefix: string;
+  ttl_min: number;
+  hits: number;
   created_at: string;
   last_seen: string;
-  domains: DomainDetail[];
+  ttl_remain_sec: number;
 }
 
 export interface DomainRule {
@@ -75,7 +74,12 @@ export interface BannedIP {
 
 export interface UserInfo {
   user: string;
+  enabled: boolean;
+  default_mode: string;
+  default_ttl: number;
+  max_ttl: number;
   rate_limit: number;
+  created_at: number;
 }
 
 export interface TrafficEntry {
@@ -89,6 +93,9 @@ export interface TrafficEntry {
   protocol: string;
   latency_ms: number;
   success: boolean;
+  sid?: string;
+  mode?: string;
+  ttl_min?: number;
 }
 
 export interface RateLimitInfo {
@@ -108,13 +115,19 @@ export const api = {
   login: (user: string, pass: string) => request<{ status: string }>('/api/login', { method: 'POST', body: JSON.stringify({ user, pass }) }),
   logout: () => request<{ status: string }>('/api/logout', { method: 'POST' }),
   overview: () => request<Overview>('/api/overview'),
-  sessions: () => request<Session[]>('/api/sessions'),
+  sessions: () => request<Session[]>('/api/sticky-sessions'),
   clearSessions: () => request<any>('/api/sessions/clear', { method: 'POST' }),
-  removeSession: (fp: string) => request<any>('/api/sessions/remove', { method: 'POST', body: JSON.stringify({ fingerprint: fp }) }),
-  users: () => request<{ users: UserInfo[] }>('/api/users'),
-  addUser: (user: string, pass: string) => request<any>('/api/users/add', { method: 'POST', body: JSON.stringify({ user, pass }) }),
-  removeUser: (user: string) => request<any>('/api/users/remove', { method: 'POST', body: JSON.stringify({ user }) }),
-  setUserRateLimit: (user: string, limit: number) => request<any>('/api/users/rate-limit', { method: 'POST', body: JSON.stringify({ user, limit }) }),
+  removeSession: (account: string, sid: string) => request<any>('/api/sticky-sessions/delete', { method: 'POST', body: JSON.stringify({ account, sid }) }),
+  users: () => request<{ users: UserInfo[]; accounts: UserInfo[] }>('/api/accounts'),
+  addUser: (body: { user: string; pass: string; default_mode?: string; default_ttl?: number; max_ttl?: number; rate_limit?: number }) =>
+    request<any>('/api/accounts/add', { method: 'POST', body: JSON.stringify(body) }),
+  removeUser: (user: string) => request<any>('/api/accounts/remove', { method: 'POST', body: JSON.stringify({ user }) }),
+  updateAccount: (body: Record<string, unknown>) => request<any>('/api/accounts/update', { method: 'POST', body: JSON.stringify(body) }),
+  generateCredentials: (body: {
+    account: string; mode: string; ttl_minutes: number; count: number;
+    protocol: string; host: string; port: number; password: string;
+  }) => request<{ status: string; lines: string[]; usernames: string[]; curl: string; message?: string }>(
+    '/api/credentials/generate', { method: 'POST', body: JSON.stringify(body) }),
   banned: () => request<{ banned: BannedIP[] }>('/api/banned'),
   unban: (ip: string) => request<any>('/api/banned/unban', { method: 'POST', body: JSON.stringify({ ip }) }),
   ban: (ip: string) => request<any>('/api/banned/ban', { method: 'POST', body: JSON.stringify({ ip }) }),
