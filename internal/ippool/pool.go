@@ -312,19 +312,33 @@ func (p *Pool) SetPrefixEnabled(prefix string, enabled bool) {
 }
 
 // TestPrefix tests connectivity through a prefix by dialing an external IPv6 endpoint.
-// Returns the observed exit IP and latency, or an error.
+// The source address is a random host in the prefix (same as live proxy exits).
+// Host ids 0 and 1 are skipped: ::1 is the HE tunnel gateway on the tunnel /64
+// and is not a usable local source.
 func (p *Pool) TestPrefix(prefix string) (string, time.Duration, error) {
 	p.mu.RLock()
-	addrs := p.allAddrs[prefix]
-	p.mu.RUnlock()
-	if len(addrs) == 0 {
-		return "", 0, fmt.Errorf("no addresses for prefix %s", prefix)
+	var bits int
+	found := false
+	for _, info := range p.prefixes {
+		if info.Prefix == prefix {
+			bits = info.Bits
+			found = true
+			break
+		}
 	}
-	testIP := addrs[0]
-	localAddr := &net.TCPAddr{IP: testIP}
+	p.mu.RUnlock()
+	if !found {
+		return "", 0, fmt.Errorf("unknown prefix %s", prefix)
+	}
+
+	testIP, err := pickTestExitIP(prefix, bits)
+	if err != nil {
+		return "", 0, err
+	}
 	dialer := &net.Dialer{
-		LocalAddr: localAddr,
+		LocalAddr: &net.TCPAddr{IP: testIP},
 		Timeout:   10 * time.Second,
+		Control:   controlFunc,
 	}
 	start := time.Now()
 	conn, err := dialer.Dial("tcp6", "[2001:4860:4860::8888]:53")
@@ -335,6 +349,48 @@ func (p *Pool) TestPrefix(prefix string) (string, time.Duration, error) {
 	localUsed := conn.LocalAddr().String()
 	conn.Close()
 	return localUsed, elapsed, nil
+}
+
+// pickTestExitIP returns a source address that matches live proxy selection:
+// random host bits, never the network address (::) or ::1.
+func pickTestExitIP(prefix string, bits int) (net.IP, error) {
+	spec := prefix
+	if bits > 0 && !strings.Contains(prefix, "/") {
+		spec = fmt.Sprintf("%s/%d", prefix, bits)
+	}
+	p, err := ipgen.ParsePrefix(spec)
+	if err != nil {
+		return nil, err
+	}
+	if p.Bits >= 128 {
+		return append(net.IP(nil), p.IP...), nil
+	}
+	for i := 0; i < 16; i++ {
+		ip, err := ipgen.Random(p.IP, p.Bits)
+		if err != nil {
+			return nil, err
+		}
+		if !reservedTestHost(ip) {
+			return ip, nil
+		}
+	}
+	return nil, fmt.Errorf("could not pick a usable test address in %s", p)
+}
+
+func reservedTestHost(ip net.IP) bool {
+	b := ip.To16()
+	if b == nil {
+		return true
+	}
+	return low64(b) <= 1
+}
+
+func low64(b net.IP) uint64 {
+	var v uint64
+	for _, x := range b[8:] {
+		v = (v << 8) | uint64(x)
+	}
+	return v
 }
 
 // Prefix returns the first prefix string (backward compat).

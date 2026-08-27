@@ -1,6 +1,8 @@
 package ippool
 
 import (
+	"net"
+	"strings"
 	"testing"
 	"time"
 )
@@ -112,6 +114,48 @@ func TestDomainRuleRandom(t *testing.T) {
 	}
 	if len(seen) < 2 || len(seen) > 5 {
 		t.Fatalf("expected 2~5 different IPs from random with count=5, got %d", len(seen))
+	}
+}
+
+func TestPickTestExitIPSkipsGateway(t *testing.T) {
+	gateway := net.ParseIP("2001:470:23:692::1")
+	network := net.ParseIP("2001:470:23:692::")
+	for i := 0; i < 50; i++ {
+		ip, err := pickTestExitIP("2001:470:23:692", 64)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ip.Equal(gateway) {
+			t.Fatalf("test source must not be tunnel gateway ::1, got %s", ip)
+		}
+		if ip.Equal(network) {
+			t.Fatalf("test source must not be network ::, got %s", ip)
+		}
+		if !strings.HasPrefix(ip.String(), "2001:470:23:692:") {
+			t.Fatalf("test source left the prefix: %s", ip)
+		}
+	}
+}
+
+func TestPickTestExitIP128(t *testing.T) {
+	ip, err := pickTestExitIP("2001:db8::5", 128)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ip.Equal(net.ParseIP("2001:db8::5")) {
+		t.Fatalf("got %s", ip)
+	}
+}
+
+func TestReservedTestHost(t *testing.T) {
+	if !reservedTestHost(net.ParseIP("2001:470:23:692::")) {
+		t.Fatal("network should be reserved")
+	}
+	if !reservedTestHost(net.ParseIP("2001:470:23:692::1")) {
+		t.Fatal("::1 should be reserved")
+	}
+	if reservedTestHost(net.ParseIP("2001:470:23:692::2")) {
+		t.Fatal("::2 should be allowed")
 	}
 }
 
