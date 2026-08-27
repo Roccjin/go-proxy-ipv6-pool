@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { FlaskConical, Power, PowerOff, RefreshCw } from 'lucide-react'
+import { FlaskConical, Power, PowerOff, RefreshCw, Shield, ShieldOff } from 'lucide-react'
 import { Overview, PrefixInfo, api } from '../api'
 import { useI18n } from '../i18n'
 import Layout from './Layout'
@@ -141,13 +141,43 @@ function PrefixBody({ p, onRefresh, hero }: { p: PrefixInfo; onRefresh: () => vo
 
 export default function OverviewPanel({ data, onRefresh }: { data: Overview | null; onRefresh: () => void }) {
   const { m } = useI18n()
+  const [togglingV4, setTogglingV4] = useState(false)
   if (!data) return null
 
   const prefixes = data.prefixes ?? []
   const [first, ...rest] = prefixes
+  const ipv4On = !!data.ipv4_fallback_enabled
+
+  const toggleIPv4 = async () => {
+    setTogglingV4(true)
+    try {
+      await api.setIPv4Fallback(!ipv4On)
+      onRefresh()
+    } finally {
+      setTogglingV4(false)
+    }
+  }
 
   return (
     <Layout title={m.overview.title} actions={<Btn icon={RefreshCw} onClick={onRefresh}>{m.common.refresh}</Btn>}>
+      <div className="prefix-plate" style={{ marginBottom: 22 }}>
+        <div className="prefix-meta">
+          <span className={`badge ${ipv4On ? 'warn' : 'ion'}`}>
+            {ipv4On ? m.overview.ipv4On : m.overview.ipv4Off}
+          </span>
+        </div>
+        <p className="lede" style={{ marginBottom: 0 }}>{m.overview.ipv4Hint}</p>
+        <div className="prefix-actions">
+          <Btn
+            variant={ipv4On ? 'danger' : 'ion'}
+            icon={ipv4On ? ShieldOff : Shield}
+            onClick={toggleIPv4}
+            disabled={togglingV4}
+          >
+            {ipv4On ? m.overview.ipv4Disable : m.overview.ipv4Enable}
+          </Btn>
+        </div>
+      </div>
       {first && <PrefixBody p={first} onRefresh={onRefresh} hero />}
       {rest.length > 0 && (
         <div className="prefix-grid">

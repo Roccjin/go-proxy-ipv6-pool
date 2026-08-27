@@ -15,7 +15,7 @@ A high-performance IPv6 proxy pool built with Go. Routes HTTP and SOCKS5 traffic
 - **IP ban system** — auto-ban after repeated auth failures, with whitelist support
 - **Traffic logging** — in-memory ring buffer (last 10,000 requests)
 - **Admin panel** — accounts, generator, sticky sessions, ports
-- **IPv4 fallback** — graceful degradation when target doesn't support IPv6
+- **IPv6-only by default** — IPv4 fallback leaks the server public IPv4, so it is off; enable with `-ipv4-fallback` or the admin toggle
 
 ## Architecture
 
@@ -208,6 +208,7 @@ Username protocol:
 | `-admin-pass` | `admin123` | Admin panel password |
 | `-data-dir` | `/etc/ipv6-proxy` | Persistent config directory |
 | `-rate-limit` | `500` | Max requests/min per user (`0` = disabled) |
+| `-ipv4-fallback` | `false` | Allow IPv4 fallback (leaks the server public IPv4) |
 
 Multi-prefix example:
 

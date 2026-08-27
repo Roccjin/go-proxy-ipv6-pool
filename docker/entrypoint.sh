@@ -18,4 +18,5 @@ exec /usr/local/bin/ipv6-proxy \
   -default-mode "${DEFAULT_MODE:-rotate}" \
   -default-ttl "${DEFAULT_TTL:-10m}" \
   -max-ttl "${MAX_TTL:-180m}" \
+  -ipv4-fallback "${IPV4_FALLBACK:-false}" \
   "$@"

@@ -37,6 +37,7 @@ type Deps struct {
 	PublicHost     string
 	HTTPAddr       string
 	SOCKS5Addr     string
+	Runtime        *proxy.Runtime
 }
 
 type Handler struct {
@@ -56,6 +57,7 @@ type Handler struct {
 	publicHost     string
 	httpAddr       string
 	socks5Addr     string
+	rt             *proxy.Runtime
 	mu             sync.RWMutex
 	sessions       map[string]time.Time
 }
@@ -81,6 +83,7 @@ func New(d Deps) *Handler {
 		publicHost:     d.PublicHost,
 		httpAddr:       d.HTTPAddr,
 		socks5Addr:     d.SOCKS5Addr,
+		rt:             d.Runtime,
 		sessions:       make(map[string]time.Time),
 	}
 }
@@ -120,6 +123,7 @@ func (h *Handler) Start(addr string) error {
 	mux.HandleFunc("/api/pool/expand", h.requireAuth(h.apiExpandPool))
 	mux.HandleFunc("/api/prefix/toggle", h.requireAuth(h.apiPrefixToggle))
 	mux.HandleFunc("/api/prefix/test", h.requireAuth(h.apiPrefixTest))
+	mux.HandleFunc("/api/ipv4-fallback", h.requireAuth(h.apiIPv4Fallback))
 	mux.HandleFunc("/api/traffic-log", h.requireAuth(h.apiTrafficLog))
 	mux.HandleFunc("/api/traffic-log/clear", h.requireAuth(h.apiTrafficLogClear))
 	mux.HandleFunc("/api/rate-limit", h.requireAuth(h.apiRateLimit))
@@ -294,7 +298,8 @@ func (h *Handler) apiOverview(w http.ResponseWriter, r *http.Request) {
 		"total_bytes":          stats["total_bytes"],
 		"failed_requests":      stats["failed_requests"],
 		"ipv6_direct":          stats["ipv6_direct"] + s5stats["ipv6_direct"],
-		"ipv4_fallback":        stats["ipv4_fallback"] + s5stats["ipv4_fallback"],
+		"ipv4_fallback":          stats["ipv4_fallback"] + s5stats["ipv4_fallback"],
+		"ipv4_fallback_enabled":  h.rt != nil && h.rt.AllowIPv4.Load(),
 		"max_latency_ms":       maxLat.Milliseconds(),
 		"min_latency_ms":       minLat.Milliseconds(),
 		"socks5_active_conns":  s5stats["active_conns"],
@@ -304,6 +309,28 @@ func (h *Handler) apiOverview(w http.ResponseWriter, r *http.Request) {
 }
 
 
+
+func (h *Handler) apiIPv4Fallback(w http.ResponseWriter, r *http.Request) {
+	if h.rt == nil {
+		http.Error(w, "runtime unavailable", http.StatusBadGateway)
+		return
+	}
+	if r.Method == http.MethodPost {
+		var req struct {
+			Enabled bool `json:"enabled"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		h.rt.AllowIPv4.Store(req.Enabled)
+		log.Printf("IPv4 fallback %s", map[bool]string{true: "enabled", false: "disabled"}[req.Enabled])
+	}
+	writeJSON(w, map[string]interface{}{
+		"status":  "ok",
+		"enabled": h.rt.AllowIPv4.Load(),
+	})
+}
 
 func (h *Handler) apiBanned(w http.ResponseWriter, r *http.Request) {
 	banned := h.ipBan.BannedList()

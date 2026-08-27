@@ -40,6 +40,7 @@ func main() {
 	defaultMode := flag.String("default-mode", "rotate", "Default account mode: rotate or sticky")
 	defaultTTL := flag.Duration("default-ttl", 10*time.Minute, "Default sticky TTL")
 	maxTTL := flag.Duration("max-ttl", 180*time.Minute, "Max sticky TTL")
+	ipv4Fallback := flag.Bool("ipv4-fallback", false, "Allow IPv4 fallback (leaks server public IPv4; default off)")
 	flag.Parse()
 
 	_ = count
@@ -107,6 +108,12 @@ func main() {
 		Limiter:  limiter,
 		TLog:     tlog,
 	}
+	rt.AllowIPv4.Store(*ipv4Fallback)
+	if *ipv4Fallback {
+		log.Printf("IPv4 fallback enabled (IPv4-only targets use the server public IPv4)")
+	} else {
+		log.Printf("IPv4 fallback disabled (IPv6-only exits; IPv4-only sites will fail)")
+	}
 
 	proxyServer := proxy.NewServer(*proxyAddr, rt)
 	go func() {
@@ -151,6 +158,7 @@ func main() {
 		PublicHost:     host,
 		HTTPAddr:       *proxyAddr,
 		SOCKS5Addr:     *socks5Addr,
+		Runtime:        rt,
 	})
 	if err := adminHandler.Start(*adminAddr); err != nil {
 		log.Fatalf("Admin: %v", err)

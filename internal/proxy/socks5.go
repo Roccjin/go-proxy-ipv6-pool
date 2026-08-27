@@ -238,7 +238,7 @@ func (s *Socks5Server) handleRequest(conn net.Conn, admitted AdmitResult, client
 		})
 	}
 
-	dr, err := dialTarget(context.Background(), addr, exitIP)
+	dr, err := dialTarget(context.Background(), addr, exitIP, s.rt.ipv4Allowed())
 	if err != nil {
 		s.sendReply(conn, repGeneralFail, nil, 0)
 		s.stats.FailedRequests.Add(1)

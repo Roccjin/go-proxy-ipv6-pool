@@ -49,6 +49,7 @@ services:
       DEFAULT_MODE: ${DEFAULT_MODE:-rotate}
       DEFAULT_TTL: ${DEFAULT_TTL:-10m}
       MAX_TTL: ${MAX_TTL:-180m}
+      IPV4_FALLBACK: ${IPV4_FALLBACK:-false}
     volumes:
       - proxy-data:/etc/ipv6-proxy
 

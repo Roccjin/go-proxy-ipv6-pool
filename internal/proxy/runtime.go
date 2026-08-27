@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"sync/atomic"
 
 	"ipv6-proxy/internal/auth"
 	"ipv6-proxy/internal/credential"
@@ -19,11 +20,19 @@ var (
 )
 
 type Runtime struct {
-	Store    *store.Store
-	Resolver *session.Resolver
-	IPBan    *auth.IPBan
-	Limiter  *ratelimit.Limiter
-	TLog     *trafficlog.Logger
+	Store     *store.Store
+	Resolver  *session.Resolver
+	IPBan     *auth.IPBan
+	Limiter   *ratelimit.Limiter
+	TLog      *trafficlog.Logger
+	AllowIPv4 atomic.Bool
+}
+
+func (rt *Runtime) ipv4Allowed() bool {
+	if rt == nil {
+		return false
+	}
+	return rt.AllowIPv4.Load()
 }
 
 type AdmitResult struct {

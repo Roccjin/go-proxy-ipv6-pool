@@ -33,6 +33,7 @@ export interface Overview {
   failed_requests: number;
   ipv6_direct: number;
   ipv4_fallback: number;
+  ipv4_fallback_enabled?: boolean;
   max_latency_ms: number;
   min_latency_ms: number;
   socks5_active_conns: number;
@@ -139,6 +140,7 @@ export const api = {
   removeDomainRule: (domain: string) => request<any>('/api/domain-rules/remove', { method: 'POST', body: JSON.stringify({ domain }) }),
   expandPool: () => request<{ status: string; new_size: string }>('/api/pool/expand', { method: 'POST' }),
   togglePrefix: (prefix: string, enabled: boolean) => request<{ status: string; pool_size: number }>('/api/prefix/toggle', { method: 'POST', body: JSON.stringify({ prefix, enabled }) }),
+  setIPv4Fallback: (enabled: boolean) => request<{ status: string; enabled: boolean }>('/api/ipv4-fallback', { method: 'POST', body: JSON.stringify({ enabled }) }),
   testPrefix: (prefix: string) => request<{ status: string; exit_ip?: string; latency_ms?: number; message?: string }>('/api/prefix/test', { method: 'POST', body: JSON.stringify({ prefix }) }),
   trafficLog: () => request<{ entries: TrafficEntry[]; total: number }>('/api/traffic-log'),
   clearTrafficLog: () => request<any>('/api/traffic-log/clear', { method: 'POST' }),

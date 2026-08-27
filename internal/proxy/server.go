@@ -151,7 +151,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request, exitIP net.IP) (DialResult, error) {
-	dr, err := dialTarget(r.Context(), r.Host, exitIP)
+	dr, err := dialTarget(r.Context(), r.Host, exitIP, s.rt.ipv4Allowed())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return dr, err
@@ -190,7 +190,7 @@ func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request, exitIP net.I
 	var lastDR DialResult
 	transport := &http.Transport{
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			dr, err := dialTarget(ctx, addr, exitIP)
+			dr, err := dialTarget(ctx, addr, exitIP, s.rt.ipv4Allowed())
 			lastDR = dr
 			return dr.Conn, err
 		},
@@ -228,8 +228,8 @@ type DialResult struct {
 
 // dialTarget resolves the target address and picks the right source IP.
 // If the target resolves to IPv6, we bind our pool IPv6 as source.
-// If the target is IPv4-only, we fall back to the system default (no bind).
-func dialTarget(ctx context.Context, addr string, exitIP net.IP) (DialResult, error) {
+// IPv4 fallback uses the host default address (no bind) and is off unless allowIPv4.
+func dialTarget(ctx context.Context, addr string, exitIP net.IP, allowIPv4 bool) (DialResult, error) {
 	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
 		host = addr
@@ -269,10 +269,17 @@ func dialTarget(ctx context.Context, addr string, exitIP net.IP) (DialResult, er
 			}
 			return DialResult{Conn: conn, IsIPv6: true, LocalIP: localIP}, nil
 		}
-		log.Printf("IPv6 dial failed for %s (%s), trying IPv4 fallback: %v", host, target, err)
+		log.Printf("IPv6 dial failed for %s (%s): %v", host, target, err)
+		if !allowIPv4 {
+			return DialResult{}, ipv4DisabledErr(host, err)
+		}
 	}
 
-	// Fallback to IPv4 (no source bind — use system default)
+	if !allowIPv4 {
+		return DialResult{}, ipv4DisabledErr(host, nil)
+	}
+
+	// Fallback to IPv4 (no source bind — uses the server's public IPv4)
 	if len(ipv4Addrs) > 0 {
 		target := net.JoinHostPort(ipv4Addrs[0].IP.String(), port)
 		dialer := &net.Dialer{
@@ -291,6 +298,13 @@ func dialTarget(ctx context.Context, addr string, exitIP net.IP) (DialResult, er
 	}
 
 	return DialResult{}, &net.OpError{Op: "dial", Net: "tcp", Err: &net.AddrError{Err: "no reachable addresses", Addr: host}}
+}
+
+func ipv4DisabledErr(host string, ipv6Err error) error {
+	if ipv6Err != nil {
+		return fmt.Errorf("ipv6 failed for %s and ipv4 fallback disabled: %w", host, ipv6Err)
+	}
+	return fmt.Errorf("no IPv6 address for %s (ipv4 fallback disabled)", host)
 }
 
 func (s *Server) GetStats() map[string]int64 {
