@@ -19,10 +19,15 @@ const (
 )
 
 type ndpWarmCache struct {
-	mu      sync.Mutex
-	entries map[string]time.Time
-	ttl     time.Duration
-	maxSize int
+	mu       sync.Mutex
+	entries  map[string]time.Time
+	inFlight map[string]*ndpConfirmWait
+	ttl      time.Duration
+	maxSize  int
+}
+
+type ndpConfirmWait struct {
+	done chan struct{}
 }
 
 func newNDPWarmCache(ttl time.Duration, maxSize int) *ndpWarmCache {
@@ -46,6 +51,19 @@ func (cache *ndpWarmCache) Seen(ip net.IP) bool {
 	key := ip.String()
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
+	return cache.warmLocked(key)
+}
+
+func (cache *ndpWarmCache) Mark(ip net.IP) {
+	if cache == nil || ip == nil {
+		return
+	}
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	cache.markLocked(ip)
+}
+
+func (cache *ndpWarmCache) warmLocked(key string) bool {
 	seenAt, ok := cache.entries[key]
 	if !ok {
 		return false
@@ -57,20 +75,54 @@ func (cache *ndpWarmCache) Seen(ip net.IP) bool {
 	return true
 }
 
-func (cache *ndpWarmCache) Mark(ip net.IP) {
-	if cache == nil || ip == nil {
-		return
-	}
-	key := ip.String()
-	cache.mu.Lock()
-	defer cache.mu.Unlock()
+func (cache *ndpWarmCache) markLocked(ip net.IP) {
 	if len(cache.entries) >= cache.maxSize {
 		cache.evictExpiredLocked()
 		if len(cache.entries) >= cache.maxSize {
 			cache.entries = make(map[string]time.Time, cache.maxSize/2)
 		}
 	}
-	cache.entries[key] = time.Now()
+	cache.entries[ip.String()] = time.Now()
+}
+
+// beginConfirm serializes first-use warmup for one exit IP.
+// warm: already confirmed. leader: this caller should run warmup.
+func (cache *ndpWarmCache) beginConfirm(ip net.IP) (warm bool, wait <-chan struct{}, leader bool) {
+	if cache == nil || ip == nil {
+		return false, nil, true
+	}
+	key := ip.String()
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	if cache.warmLocked(key) {
+		return true, nil, false
+	}
+	if cache.inFlight == nil {
+		cache.inFlight = make(map[string]*ndpConfirmWait)
+	}
+	if waiter, ok := cache.inFlight[key]; ok {
+		return false, waiter.done, false
+	}
+	waiter := &ndpConfirmWait{done: make(chan struct{})}
+	cache.inFlight[key] = waiter
+	return false, waiter.done, true
+}
+
+func (cache *ndpWarmCache) finishConfirm(ip net.IP, succeeded bool) {
+	if cache == nil || ip == nil {
+		return
+	}
+	key := ip.String()
+	cache.mu.Lock()
+	waiter := cache.inFlight[key]
+	delete(cache.inFlight, key)
+	if succeeded {
+		cache.markLocked(ip)
+	}
+	cache.mu.Unlock()
+	if waiter != nil {
+		close(waiter.done)
+	}
 }
 
 func (cache *ndpWarmCache) evictExpiredLocked() {

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -125,6 +126,7 @@ func TestIPv6OpenerRetriesColdTimeout(t *testing.T) {
 	var calls int
 	var primed bool
 	exitIP := net.ParseIP("2001:db8::aa")
+	var clientConn net.Conn
 	opener := &ipv6Opener{
 		cache: newNDPWarmCache(time.Hour, 8),
 		prime: func(exit, dest net.IP) {
@@ -137,26 +139,36 @@ func TestIPv6OpenerRetriesColdTimeout(t *testing.T) {
 			}
 		},
 		alreadyDead: func(net.Conn) bool { return false },
+		confirm:     func(net.Conn) error { return nil },
+		probeTarget: ipv6NDPProbeTarget,
 		dial: func(ctx context.Context, target string, ip net.IP, timeout time.Duration) (net.Conn, error) {
 			calls++
-			switch calls {
-			case 1:
-				if timeout != 3*time.Second {
-					t.Fatalf("cold timeout=%s", timeout)
+			switch target {
+			case ipv6NDPProbeTarget:
+				if calls == 1 {
+					if timeout != 3*time.Second {
+						t.Fatalf("probe cold timeout=%s", timeout)
+					}
+					return nil, timeoutError{}
 				}
-				return nil, timeoutError{}
-			case 2, 3:
-				if timeout != 15*time.Second {
-					t.Fatalf("call %d timeout=%s want 15s", calls, timeout)
+				if timeout != 5*time.Second {
+					t.Fatalf("probe retry timeout=%s", timeout)
 				}
 				return stubConn{local: &net.TCPAddr{IP: ip}}, nil
+			case "[2001:db8::1]:443":
+				if timeout != 15*time.Second {
+					t.Fatalf("client timeout=%s", timeout)
+				}
+				clientConn = stubConn{local: &net.TCPAddr{IP: ip}}
+				return clientConn, nil
 			default:
-				t.Fatalf("unexpected dial call %d", calls)
-				return nil, errors.New("too many dials")
+				t.Fatalf("unexpected target %s", target)
+				return nil, errors.New("unexpected target")
 			}
 		},
 		coldTimeout: 3 * time.Second,
 		warmTimeout: 15 * time.Second,
+		warmupRetry: 5 * time.Second,
 	}
 
 	conn, err := opener.open(context.Background(), "[2001:db8::1]:443", exitIP)
@@ -167,8 +179,11 @@ func TestIPv6OpenerRetriesColdTimeout(t *testing.T) {
 	if !primed {
 		t.Fatal("expected NDP prime on cold IP")
 	}
-	if calls != 2 {
-		t.Fatalf("calls=%d want 2", calls)
+	if calls != 3 {
+		t.Fatalf("warmup+client calls=%d want 3", calls)
+	}
+	if conn != clientConn {
+		t.Fatal("client must receive a fresh connection, not the warmup socket")
 	}
 
 	primed = false
@@ -178,8 +193,8 @@ func TestIPv6OpenerRetriesColdTimeout(t *testing.T) {
 	if primed {
 		t.Fatal("warm IP must not be primed again")
 	}
-	if calls != 3 {
-		t.Fatalf("warm dial total calls=%d want 3", calls)
+	if calls != 4 {
+		t.Fatalf("warm client dial total calls=%d want 4", calls)
 	}
 }
 
@@ -191,18 +206,21 @@ func TestIPv6OpenerRetriesDeadSocket(t *testing.T) {
 		alreadyDead: func(net.Conn) bool {
 			return calls == 1
 		},
+		confirm:     func(net.Conn) error { return nil },
+		probeTarget: ipv6NDPProbeTarget,
 		dial: func(ctx context.Context, target string, ip net.IP, timeout time.Duration) (net.Conn, error) {
 			calls++
 			return stubConn{local: &net.TCPAddr{IP: ip}}, nil
 		},
 		coldTimeout: 3 * time.Second,
 		warmTimeout: 15 * time.Second,
+		warmupRetry: 5 * time.Second,
 	}
 	if _, err := opener.open(context.Background(), "[2001:db8::1]:443", net.ParseIP("2001:db8::bb")); err != nil {
 		t.Fatal(err)
 	}
-	if calls != 2 {
-		t.Fatalf("calls=%d want 2", calls)
+	if calls != 3 {
+		t.Fatalf("dead warmup + client calls=%d want 3", calls)
 	}
 }
 
@@ -213,6 +231,8 @@ func TestIPv6OpenerSkipsRetryWhenContextCanceled(t *testing.T) {
 		cache:       newNDPWarmCache(time.Hour, 8),
 		prime:       func(net.IP, net.IP) {},
 		alreadyDead: func(net.Conn) bool { return false },
+		confirm:     func(net.Conn) error { return nil },
+		probeTarget: ipv6NDPProbeTarget,
 		dial: func(ctx context.Context, target string, ip net.IP, timeout time.Duration) (net.Conn, error) {
 			calls++
 			cancel()
@@ -220,6 +240,7 @@ func TestIPv6OpenerSkipsRetryWhenContextCanceled(t *testing.T) {
 		},
 		coldTimeout: 3 * time.Second,
 		warmTimeout: 15 * time.Second,
+		warmupRetry: 5 * time.Second,
 	}
 	_, err := opener.open(ctx, "[2001:db8::1]:443", net.ParseIP("2001:db8::cc"))
 	if err == nil {
@@ -236,3 +257,116 @@ func TestIPFromDialAddr(t *testing.T) {
 		t.Fatalf("got %s", ip)
 	}
 }
+
+func TestConfirmDNSTCP(t *testing.T) {
+	response := append([]byte{0x00, 0x0c}, bytes.Repeat([]byte{0xab}, 12)...)
+	conn := &scriptedConn{readBuf: bytes.NewBuffer(response), wrote: &bytes.Buffer{}}
+	if err := confirmDNSTCP(conn); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(conn.wrote.Bytes(), dnsTCPRootNSQuery) {
+		t.Fatalf("wrote %x", conn.wrote.Bytes())
+	}
+}
+
+func TestIPv6OpenerFallsBackToTargetWarmup(t *testing.T) {
+	var probeCalls, destCalls int
+	opener := &ipv6Opener{
+		cache:       newNDPWarmCache(time.Hour, 8),
+		prime:       func(net.IP, net.IP) {},
+		alreadyDead: func(net.Conn) bool { return false },
+		confirm:     func(net.Conn) error { return errors.New("probe data failed") },
+		probeTarget: ipv6NDPProbeTarget,
+		dial: func(ctx context.Context, target string, ip net.IP, timeout time.Duration) (net.Conn, error) {
+			switch target {
+			case ipv6NDPProbeTarget:
+				probeCalls++
+				return stubConn{local: &net.TCPAddr{IP: ip}}, nil
+			case "[2001:db8::1]:443":
+				destCalls++
+				return stubConn{local: &net.TCPAddr{IP: ip}}, nil
+			default:
+				t.Fatalf("unexpected target %s", target)
+				return nil, errors.New("unexpected target")
+			}
+		},
+		coldTimeout: 3 * time.Second,
+		warmTimeout: 15 * time.Second,
+		warmupRetry: 5 * time.Second,
+	}
+	if _, err := opener.open(context.Background(), "[2001:db8::1]:443", net.ParseIP("2001:db8::dd")); err != nil {
+		t.Fatal(err)
+	}
+	if probeCalls != 1 {
+		t.Fatalf("probeCalls=%d", probeCalls)
+	}
+	if destCalls != 2 {
+		t.Fatalf("dest warmup + client destCalls=%d want 2", destCalls)
+	}
+}
+
+func TestIPv6OpenerSingleflightWarmup(t *testing.T) {
+	enteredProbe := make(chan struct{})
+	releaseProbe := make(chan struct{})
+	var probeCalls, destCalls int
+	var mu sync.Mutex
+	opener := &ipv6Opener{
+		cache:       newNDPWarmCache(time.Hour, 8),
+		prime:       func(net.IP, net.IP) {},
+		alreadyDead: func(net.Conn) bool { return false },
+		confirm:     func(net.Conn) error { return nil },
+		probeTarget: ipv6NDPProbeTarget,
+		dial: func(ctx context.Context, target string, ip net.IP, timeout time.Duration) (net.Conn, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			if target == ipv6NDPProbeTarget {
+				probeCalls++
+				if probeCalls == 1 {
+					close(enteredProbe)
+					mu.Unlock()
+					<-releaseProbe
+					mu.Lock()
+				}
+				return stubConn{local: &net.TCPAddr{IP: ip}}, nil
+			}
+			destCalls++
+			return stubConn{local: &net.TCPAddr{IP: ip}}, nil
+		},
+		coldTimeout: 3 * time.Second,
+		warmTimeout: 15 * time.Second,
+		warmupRetry: 5 * time.Second,
+	}
+	exitIP := net.ParseIP("2001:db8::ee")
+	errCh := make(chan error, 2)
+	go func() {
+		_, err := opener.open(context.Background(), "[2001:db8::1]:443", exitIP)
+		errCh <- err
+	}()
+	<-enteredProbe
+	go func() {
+		_, err := opener.open(context.Background(), "[2001:db8::1]:443", exitIP)
+		errCh <- err
+	}()
+	time.Sleep(20 * time.Millisecond)
+	close(releaseProbe)
+	for i := 0; i < 2; i++ {
+		if err := <-errCh; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if probeCalls != 1 {
+		t.Fatalf("probeCalls=%d want 1", probeCalls)
+	}
+	if destCalls != 2 {
+		t.Fatalf("destCalls=%d want 2", destCalls)
+	}
+}
+
+type scriptedConn struct {
+	stubConn
+	readBuf *bytes.Buffer
+	wrote   *bytes.Buffer
+}
+
+func (c *scriptedConn) Read(p []byte) (int, error)  { return c.readBuf.Read(p) }
+func (c *scriptedConn) Write(p []byte) (int, error) { return c.wrote.Write(p) }

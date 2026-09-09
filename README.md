@@ -239,7 +239,7 @@ curl --socks5 caomao002_sid_46916889_time_10:Aq112211@127.0.0.1:8082 https://ipv
    - **轮转**：在前缀主机位上 `crypto/rand`
    - **粘性**：Redis 对 `账号+sid → 出口 IP` 做 GET-or-SET，TTL 从首次使用起算
 4. `IP_FREEBIND` / `IPV6_FREEBIND` 把该地址绑成 TCP 源地址
-5. 新出口 IP 首次使用时会主动发 ICMPv6 Neighbor Advertisement 预热 NDP，TCP 失败再透明重试一次，避免第一次 HTTPS 在邻居未收敛时被 RST
+5. 新出口 IP 首次使用时，代理会先自己完成一次确认成功的预热（NDP 通告 + DNS/目标探测），成功后才把 SOCKS5/HTTP CONNECT 交给客户端，避免第一次 TLS 当“唤醒请求”
 6. 粘性 TTL 到期后，同一用户名会拿到 **新的** IPv6，并开启下一窗口
 
 ## 生产建议
