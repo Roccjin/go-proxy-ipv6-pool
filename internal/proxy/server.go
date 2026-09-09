@@ -17,11 +17,11 @@ import (
 )
 
 type Stats struct {
-	ActiveConns      atomic.Int64
-	TotalBytes       atomic.Int64
-	FailedRequests   atomic.Int64
-	IPv6Direct       atomic.Int64
-	IPv4Fallback     atomic.Int64
+	ActiveConns    atomic.Int64
+	TotalBytes     atomic.Int64
+	FailedRequests atomic.Int64
+	IPv6Direct     atomic.Int64
+	IPv4Fallback   atomic.Int64
 }
 
 type Server struct {
@@ -217,94 +217,6 @@ func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request, exitIP net.I
 	n, _ := io.Copy(w, resp.Body)
 	s.stats.TotalBytes.Add(n)
 	return lastDR, nil
-}
-
-// DialResult holds the outcome of a dialTarget call.
-type DialResult struct {
-	Conn   net.Conn
-	IsIPv6 bool   // true if connected via IPv6 with pool exit IP
-	LocalIP string // actual local address used
-}
-
-// dialTarget resolves the target address and picks the right source IP.
-// If the target resolves to IPv6, we bind our pool IPv6 as source.
-// IPv4 fallback uses the host default address (no bind) and is off unless allowIPv4.
-func dialTarget(ctx context.Context, addr string, exitIP net.IP, allowIPv4 bool) (DialResult, error) {
-	host, port, err := net.SplitHostPort(addr)
-	if err != nil {
-		host = addr
-		port = "80"
-	}
-
-	// Resolve with system default resolver (supports both A and AAAA)
-	ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
-	if err != nil {
-		return DialResult{}, err
-	}
-
-	// Prefer IPv6 targets so we can use our pool address
-	var ipv6Addrs, ipv4Addrs []net.IPAddr
-	for _, ip := range ips {
-		if ip.IP.To4() == nil {
-			ipv6Addrs = append(ipv6Addrs, ip)
-		} else {
-			ipv4Addrs = append(ipv4Addrs, ip)
-		}
-	}
-
-	// Try IPv6 first (with our exit IP bound)
-	if len(ipv6Addrs) > 0 {
-		target := net.JoinHostPort(ipv6Addrs[0].IP.String(), port)
-		dialer := &net.Dialer{
-			LocalAddr: &net.TCPAddr{IP: exitIP},
-			Timeout:   15 * time.Second,
-			KeepAlive: 30 * time.Second,
-			Control:   controlFunc,
-		}
-		conn, err := dialer.DialContext(ctx, "tcp6", target)
-		if err == nil {
-			localIP := ""
-			if la, ok := conn.LocalAddr().(*net.TCPAddr); ok {
-				localIP = la.IP.String()
-			}
-			return DialResult{Conn: conn, IsIPv6: true, LocalIP: localIP}, nil
-		}
-		log.Printf("IPv6 dial failed for %s (%s): %v", host, target, err)
-		if !allowIPv4 {
-			return DialResult{}, ipv4DisabledErr(host, err)
-		}
-	}
-
-	if !allowIPv4 {
-		return DialResult{}, ipv4DisabledErr(host, nil)
-	}
-
-	// Fallback to IPv4 (no source bind — uses the server's public IPv4)
-	if len(ipv4Addrs) > 0 {
-		target := net.JoinHostPort(ipv4Addrs[0].IP.String(), port)
-		dialer := &net.Dialer{
-			Timeout:   15 * time.Second,
-			KeepAlive: 30 * time.Second,
-		}
-		conn, err := dialer.DialContext(ctx, "tcp4", target)
-		if err != nil {
-			return DialResult{}, err
-		}
-		localIP := ""
-		if la, ok := conn.LocalAddr().(*net.TCPAddr); ok {
-			localIP = la.IP.String()
-		}
-		return DialResult{Conn: conn, IsIPv6: false, LocalIP: localIP}, nil
-	}
-
-	return DialResult{}, &net.OpError{Op: "dial", Net: "tcp", Err: &net.AddrError{Err: "no reachable addresses", Addr: host}}
-}
-
-func ipv4DisabledErr(host string, ipv6Err error) error {
-	if ipv6Err != nil {
-		return fmt.Errorf("ipv6 failed for %s and ipv4 fallback disabled: %w", host, ipv6Err)
-	}
-	return fmt.Errorf("no IPv6 address for %s (ipv4 fallback disabled)", host)
 }
 
 func (s *Server) GetStats() map[string]int64 {

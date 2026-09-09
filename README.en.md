@@ -239,7 +239,8 @@ Access the admin panel at `http://your-server:8081` after starting the service.
    - **rotate**: `crypto/rand` host bits inside the prefix
    - **sticky**: Redis `GET-or-SET` of `account+sid → exit IP` with a fixed TTL from first use
 4. `IP_FREEBIND` / `IPV6_FREEBIND` bind that address as the TCP source
-5. After sticky TTL expires, the same username gets a **new** IPv6 and a new window
+5. A new exit IP is primed with an unsolicited ICMPv6 Neighbor Advertisement; a failed first TCP dial is retried once so HTTPS does not see an NDP race
+6. After sticky TTL expires, the same username gets a **new** IPv6 and a new window
 
 ## Production Tips
 

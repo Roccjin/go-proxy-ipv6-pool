@@ -68,8 +68,8 @@ type PrefixInfo struct {
 type Pool struct {
 	mu          sync.RWMutex
 	prefixes    []PrefixInfo
-	addrs       []net.IP              // active addrs (only from enabled prefixes)
-	allAddrs    map[string][]net.IP   // prefix -> all addrs for that prefix
+	addrs       []net.IP                  // active addrs (only from enabled prefixes)
+	allAddrs    map[string][]net.IP       // prefix -> all addrs for that prefix
 	sessions    map[string]*StickySession // fingerprint -> session
 	domainRules map[string]*DomainRule    // domain -> rule
 	ttl         time.Duration
@@ -341,7 +341,13 @@ func (p *Pool) TestPrefix(prefix string) (string, time.Duration, error) {
 		Control:   controlFunc,
 	}
 	start := time.Now()
-	conn, err := dialer.Dial("tcp6", "[2001:4860:4860::8888]:53")
+	var conn net.Conn
+	for attempt := 0; attempt < 2; attempt++ {
+		conn, err = dialer.Dial("tcp6", "[2001:4860:4860::8888]:53")
+		if err == nil {
+			break
+		}
+	}
 	elapsed := time.Since(start)
 	if err != nil {
 		return "", elapsed, fmt.Errorf("dial failed via %s: %v", testIP, err)
